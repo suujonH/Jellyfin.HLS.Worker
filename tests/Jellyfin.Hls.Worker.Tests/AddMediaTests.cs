@@ -145,6 +145,18 @@ public sealed class AddMediaTests : IDisposable
     }
 
     [Fact]
+    public async Task Add_RefusesAPrefixTheServerRefuses()
+    {
+        File.WriteAllText(Path.Combine(_directory, "source", "Film.mkv"), "v");
+        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new[] { new VirtualFolder("Movies", _library.ToString(), ["/srv/nas/movies"]) })));
+        using var engine = new WorkerEngine(Settings(), NullLoggerFactory.Instance, server);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => engine.AddAsync(
+            new AddRequest(_library, [Path.Combine(_directory, "source", "Film.mkv")], Prefix: "media/../x"),
+            CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Add_Direct_RefusesFilesOfTheSameName()
     {
         Directory.CreateDirectory(Path.Combine(_directory, "source", "a"));

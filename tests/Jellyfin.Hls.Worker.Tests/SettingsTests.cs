@@ -56,6 +56,41 @@ public sealed class SettingsTests : IDisposable
 
     // Through Validate, as Load takes the key from JELLYFIN_HLS_API_KEY when it is set.
     [Fact]
+    public void Read_KeepsTheFileAsItIs()
+    {
+        var path = Write("""
+            { "WorkDirectory": "work", "Ffmpeg": "bin/ffmpeg", "Connections": [ { "Name": "x", "Type": "S3" } ] }
+            """);
+
+        var settings = WorkerSettings.Read(path);
+
+        Assert.Equal("work", settings.WorkDirectory);
+        Assert.Equal("bin/ffmpeg", settings.Ffmpeg);
+        Assert.Empty(settings.ApiKey);
+        Assert.Throws<ArgumentException>(() => WorkerSettings.Load(path));
+    }
+
+    [Fact]
+    public void Read_TakesNullListsAsEmpty_AndNullTextsAsTheDefaults()
+    {
+        var path = Write("""
+            { "ApiKey": "k", "Ffmpeg": null, "Connections": null, "Libraries": [ null ], "Hls": { "Connection": null } }
+            """);
+
+        var settings = WorkerSettings.Read(path);
+
+        Assert.Empty(settings.Connections);
+        Assert.Empty(settings.Libraries);
+        Assert.Equal("ffmpeg", settings.Ffmpeg);
+        Assert.Equal(string.Empty, settings.Hls!.Connection);
+
+        path = Write("""
+            { "ApiKey": "k", "Connections": [ { "Name": "s", "Type": "S3", "Region": null } ] }
+            """);
+        Assert.Equal("us-east-1", WorkerSettings.Read(path).Connections[0].Region);
+    }
+
+    [Fact]
     public void Validate_RequiresAnApiKey()
     {
         var error = Assert.Throws<ArgumentException>(() => new WorkerSettings().Validate());

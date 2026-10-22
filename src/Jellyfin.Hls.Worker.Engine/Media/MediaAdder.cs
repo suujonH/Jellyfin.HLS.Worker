@@ -16,7 +16,14 @@ namespace Jellyfin.Hls.Worker.Media;
 /// <param name="Into">The folder below the folder of the library to add them to, with forward slashes; empty for the folder itself.</param>
 /// <param name="Connection">The S3 connection of the media, empty for the folder of the library, <c>null</c> for the default of the library.</param>
 /// <param name="Qualities">The qualities to encode at once; the others are encoded once the server scanned the media.</param>
-public sealed record AddRequest(Guid LibraryId, IReadOnlyList<string> Paths, string Into = "", string? Connection = null, IReadOnlyList<int>? Qualities = null);
+/// <param name="Prefix">The folder of the bucket to put media on S3 in, <c>null</c> for the default of the library.</param>
+public sealed record AddRequest(
+    Guid LibraryId,
+    IReadOnlyList<string> Paths,
+    string Into = "",
+    string? Connection = null,
+    IReadOnlyList<int>? Qualities = null,
+    string? Prefix = null);
 
 /// <summary>
 /// What an addition did.
@@ -170,6 +177,11 @@ public sealed class MediaAdder
         var qualities = await GetQualitiesAsync(request, library, cancellationToken).ConfigureAwait(false);
         var defaults = _settings.GetLibrary(request.LibraryId);
         var name = request.Connection ?? defaults.Connection;
+        var prefix = (request.Prefix ?? defaults.Prefix).Trim('/');
+        if (prefix.Length > 0 && !StoragePath.IsValidRelative(prefix))
+        {
+            throw new ArgumentException("S3 前缀应为相对路径，使用 /：" + prefix);
+        }
         StorageConnection? s3 = null;
         if (name.Length > 0)
         {
@@ -200,7 +212,7 @@ public sealed class MediaAdder
         {
             try
             {
-                await AddFileAsync(folder, s3, defaults.Prefix, localPath, path, request.LibraryId, qualities, cancellationToken).ConfigureAwait(false);
+                await AddFileAsync(folder, s3, prefix, localPath, path, request.LibraryId, qualities, cancellationToken).ConfigureAwait(false);
                 added++;
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
