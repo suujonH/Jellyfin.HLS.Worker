@@ -4,3 +4,4 @@ artifacts/
 worker.local.json
 *.user
 .vs/
+worker.json
