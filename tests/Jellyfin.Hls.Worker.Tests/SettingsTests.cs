@@ -36,6 +36,27 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(Path.Combine(_directory, "hls"), settings.Connections[0].LocalRoot);
     }
 
+    [Fact]
+    public void Load_TakesTheTrueCacheToolPublishedWithTheWorker_UnlessAnotherIsGiven()
+    {
+        var path = Write("""{ "ApiKey": "k" }""");
+        var other = Write("""{ "ApiKey": "k", "TrueCacheTool": "tools/truecache" }""");
+        Assert.Equal(WorkerSettings.DefaultTrueCacheTool, WorkerSettings.Load(path).TrueCacheTool);
+
+        var bundled = WorkerSettings.BundledTrueCacheTool;
+        Directory.CreateDirectory(Path.GetDirectoryName(bundled)!);
+        File.WriteAllText(bundled, string.Empty);
+        try
+        {
+            Assert.Equal(bundled, WorkerSettings.Load(path).TrueCacheTool);
+            Assert.Equal(Path.GetFullPath(Path.Combine(_directory, "tools", "truecache")), WorkerSettings.Load(other).TrueCacheTool);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(bundled)!, true);
+        }
+    }
+
     [Theory]
     [InlineData("""{ "Server": "ftp://x", "ApiKey": "k" }""", "Server")]
     [InlineData("""{ "ApiKey": "k", "Concurrency": 0 }""", "Concurrency")]
