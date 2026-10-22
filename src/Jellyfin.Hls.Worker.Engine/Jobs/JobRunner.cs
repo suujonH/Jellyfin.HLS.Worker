@@ -31,6 +31,7 @@ public sealed partial class JobRunner
     private readonly HlsTarget _target;
     private readonly InputCache _cache;
     private readonly WorkArea _area;
+    private readonly MediaDatabase? _database;
     private readonly SemaphoreSlim _uploading;
     private readonly HlsEncoder _encoder;
     private readonly ILogger _logger;
@@ -45,8 +46,18 @@ public sealed partial class JobRunner
     /// <param name="area">The work directory.</param>
     /// <param name="uploading">The upload slots.</param>
     /// <param name="logger">The logger.</param>
-    public JobRunner(WorkerSettings settings, ServerClient server, HlsTarget target, InputCache cache, WorkArea area, SemaphoreSlim uploading, ILogger logger)
+    /// <param name="database">The local copies of library files, or <c>null</c>.</param>
+    public JobRunner(
+        WorkerSettings settings,
+        ServerClient server,
+        HlsTarget target,
+        InputCache cache,
+        WorkArea area,
+        SemaphoreSlim uploading,
+        ILogger logger,
+        MediaDatabase? database = null)
     {
+        _database = database;
         _settings = settings;
         _server = server;
         _target = target;
@@ -69,6 +80,19 @@ public sealed partial class JobRunner
         ArgumentNullException.ThrowIfNull(assignment);
         return RunCoreAsync(assignment.Lease, token => PrepareAsync(assignment, token), encodeSlot, cancellationToken);
     }
+
+    /// <summary>
+    /// Runs a job the server created for a file this worker adds: the plan came with the lease, and the file is here.
+    /// </summary>
+    /// <param name="lease">The lease.</param>
+    /// <param name="plan">The plan.</param>
+    /// <param name="inputPath">The file.</param>
+    /// <param name="sha256">Its SHA-256.</param>
+    /// <param name="encodeSlot">The encode slot the caller took; it is released when the encoding ends.</param>
+    /// <param name="cancellationToken">The cancellation token of the worker.</param>
+    /// <returns>Whether the job succeeded.</returns>
+    public Task<bool> RunEagerAsync(WorkLease lease, EncodePlan plan, string inputPath, string sha256, SemaphoreSlim encodeSlot, CancellationToken cancellationToken)
+        => RunCoreAsync(lease, _ => Task.FromResult<PreparedJob?>(new PreparedJob(plan, inputPath, sha256, null)), encodeSlot, cancellationToken);
 
     /// <summary>
     /// Runs a job from a lease: prepares it, then encodes, uploads and reports it.
@@ -180,9 +204,17 @@ public sealed partial class JobRunner
         }
     }
 
+    // A file this worker added is read where it is, with the hash recorded when it was added; anything else is downloaded.
     private async Task<PreparedJob?> PrepareAsync(WorkAssignment assignment, CancellationToken cancellationToken)
     {
         var lease = assignment.Lease;
+        if (_database?.Find(assignment.Source.Path, assignment.Source.Length, assignment.Source.DateModified) is { } copy)
+        {
+            _logger.LogInformation("任务 {JobId}：使用本地文件 {Path}", lease.JobId, copy.LocalPath);
+            var plan = await IdentifyAsync(lease, copy.LocalPath, copy.Sha256, cancellationToken).ConfigureAwait(false);
+            return plan is null ? null : new PreparedJob(plan, copy.LocalPath, copy.Sha256, null);
+        }
+
         var input = await _cache.AcquireAsync(
             assignment.Source,
             (path, token) =>
@@ -193,16 +225,13 @@ public sealed partial class JobRunner
             cancellationToken).ConfigureAwait(false);
         try
         {
-            var probe = await ProbeAsync(input.Path, cancellationToken).ConfigureAwait(false);
-            var answer = await _server.IdentifyAsync(lease.JobId, new Identification(lease.LeaseToken, input.Sha256, probe, _target.Base), cancellationToken)
-                .ConfigureAwait(false);
-            if (answer.Done)
+            var plan = await IdentifyAsync(lease, input.Path, input.Sha256, cancellationToken).ConfigureAwait(false);
+            if (plan is null)
             {
                 input.Dispose();
                 return null;
             }
 
-            var plan = answer.Plan ?? throw new InvalidDataException("服务器没有返回编码计划。");
             if (!string.Equals(plan.Sha256, input.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 // The cached file is not what the server read; the next attempt downloads it again.
@@ -216,6 +245,15 @@ public sealed partial class JobRunner
             input.Dispose();
             throw;
         }
+    }
+
+    // The plan, or null when the server has nothing left to do.
+    private async Task<EncodePlan?> IdentifyAsync(WorkLease lease, string path, string sha256, CancellationToken cancellationToken)
+    {
+        var probe = await ProbeAsync(path, cancellationToken).ConfigureAwait(false);
+        var answer = await _server.IdentifyAsync(lease.JobId, new Identification(lease.LeaseToken, sha256, probe, _target.Base), cancellationToken)
+            .ConfigureAwait(false);
+        return answer.Done ? null : answer.Plan ?? throw new InvalidDataException("服务器没有返回编码计划。");
     }
 
     /// <summary>

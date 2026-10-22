@@ -1,5 +1,6 @@
 using Jellyfin.Hls.Worker.Configuration;
 using Jellyfin.Hls.Worker.Jobs;
+using Jellyfin.Hls.Worker.Media;
 using Jellyfin.Hls.Worker.Protocol;
 using Jellyfin.Hls.Worker.Storage;
 using Microsoft.Extensions.Logging;
@@ -30,6 +31,9 @@ public sealed class WorkerEngine : IDisposable
     private readonly HlsTarget _target;
     private readonly SemaphoreSlim _encoding;
     private readonly SemaphoreSlim _uploading;
+    private readonly Lock _gate = new();
+    private Workspace? _workspace;
+    private int _adding;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="WorkerEngine"/> class.
@@ -69,10 +73,9 @@ public sealed class WorkerEngine : IDisposable
     /// <returns><see cref="Success"/>, <see cref="Failed"/> or <see cref="Stopped"/>.</returns>
     public async Task<int> RunAsync(bool once, CancellationToken cancellationToken)
     {
-        using var area = new WorkArea(_settings.WorkDirectory, _settings.KeepFailedJobs);
-        var cache = new InputCache(area.Inputs, (long)(_settings.InputCacheGiB * 1024 * 1024 * 1024));
-        cache.Trim();
-        var runner = new JobRunner(_settings, _server, _target, cache, area, _uploading, _logger);
+        var workspace = GetWorkspace();
+        workspace.Cache.Trim();
+        var runner = workspace.Runner;
         var active = new List<Task<bool>>();
         var failed = false;
         try
@@ -99,8 +102,22 @@ public sealed class WorkerEngine : IDisposable
                     continue;
                 }
 
-                // A job is claimed only when it can start encoding at once; the slot goes to the job.
+                // Media being added comes first: its files are here, and the library waits for them.
+                if (Volatile.Read(ref _adding) > 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // A job is claimed only when it can start encoding at once; the slot goes to the job. Media being added while
+                // waiting for it still comes first.
                 await _encoding.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (Volatile.Read(ref _adding) > 0)
+                {
+                    _encoding.Release();
+                    continue;
+                }
+
                 WorkAssignment? assignment;
                 try
                 {
@@ -160,9 +177,36 @@ public sealed class WorkerEngine : IDisposable
         return cancellationToken.IsCancellationRequested ? Stopped : failed ? Failed : Success;
     }
 
+    /// <summary>
+    /// Adds files of this machine to a library, and encodes the qualities asked for at once. While media is added, no job is claimed.
+    /// </summary>
+    /// <param name="request">What to add.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>What was done.</returns>
+    /// <exception cref="ArgumentException">The request cannot be carried out.</exception>
+    public async Task<AddResult> AddAsync(AddRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        Interlocked.Increment(ref _adding);
+        try
+        {
+            if (request.Qualities is { Count: > 0 } && !await StartAsync(true, cancellationToken).ConfigureAwait(false))
+            {
+                throw new ArgumentException("服务器无法使用 HLS 根，不能随添加编码。");
+            }
+
+            return await GetWorkspace().Adder.AddAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _adding);
+        }
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
+        _workspace?.Area.Dispose();
         _server.Dispose();
         foreach (var connection in _connections.Values)
         {
@@ -189,6 +233,12 @@ public sealed class WorkerEngine : IDisposable
             try
             {
                 await _server.CheckProtocolAsync(cancellationToken).ConfigureAwait(false);
+                if (_target.Connection.Settings.Type == ConnectionType.S3
+                    && await MediaAdder.EnsureAccessAsync(_server, _target.Connection.Settings, cancellationToken).ConfigureAwait(false))
+                {
+                    _logger.LogInformation("已在服务器上为桶 {Bucket} 创建网络存储访问权限", _target.Connection.Settings.Bucket);
+                }
+
                 if (await _target.PrepareAsync(cancellationToken).ConfigureAwait(false))
                 {
                     _logger.LogInformation("已在 HLS 根写入标记 {Marker}", HlsTarget.MarkerName);
@@ -217,6 +267,25 @@ public sealed class WorkerEngine : IDisposable
         return true;
     }
 
+    // The work directory is locked on first use, not when the engine is made, so a check can run beside a running worker.
+    private Workspace GetWorkspace()
+    {
+        lock (_gate)
+        {
+            if (_workspace is null)
+            {
+                var area = new WorkArea(_settings.WorkDirectory, _settings.KeepFailedJobs);
+                var cache = new InputCache(area.Inputs, (long)(_settings.InputCacheGiB * 1024 * 1024 * 1024));
+                var database = new MediaDatabase(_settings.DatabasePath);
+                var runner = new JobRunner(_settings, _server, _target, cache, area, _uploading, _logger, database);
+                var adder = new MediaAdder(_settings, _server, _connections, _target, runner, database, area, _encoding, _logger);
+                _workspace = new Workspace(area, cache, runner, adder);
+            }
+
+            return _workspace;
+        }
+    }
+
     private static TimeSpan Backoff(int failures) => TimeSpan.FromSeconds(Math.Min(MaxBackoffSeconds, 5 * Math.Pow(2, Math.Min(failures, 4))));
 
     // Whether a job that ended failed.
@@ -231,4 +300,6 @@ public sealed class WorkerEngine : IDisposable
 
         return failed;
     }
+
+    private sealed record Workspace(WorkArea Area, InputCache Cache, JobRunner Runner, MediaAdder Adder);
 }

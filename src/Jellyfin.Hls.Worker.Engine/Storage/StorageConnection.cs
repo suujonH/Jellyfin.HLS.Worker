@@ -36,6 +36,25 @@ public interface IStorageSession : IDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task.</returns>
     Task DeleteAsync(string path, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Renames a directory, creating the parent of the new name; a directory of the new name must not exist.
+    /// </summary>
+    /// <param name="path">The directory, with forward slashes.</param>
+    /// <param name="newPath">Its new name, with forward slashes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Whether the directory existed.</returns>
+    /// <exception cref="NotSupportedException">The storage has no directories.</exception>
+    Task<bool> MoveDirectoryAsync(string path, string newPath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes a directory with everything in it; one that does not exist is no error.
+    /// </summary>
+    /// <param name="path">The directory, with forward slashes.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    /// <exception cref="NotSupportedException">The storage has no directories.</exception>
+    Task DeleteDirectoryAsync(string path, CancellationToken cancellationToken);
 }
 
 /// <summary>

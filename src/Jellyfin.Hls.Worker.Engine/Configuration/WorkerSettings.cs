@@ -34,6 +34,9 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets the ffprobe executable.</summary>
     public string Ffprobe { get; set; } = "ffprobe";
 
+    /// <summary>Gets or sets the TrueCache tool, which writes the entries of the media put on S3.</summary>
+    public string TrueCacheTool { get; set; } = "Jellyfin.TrueCache.Tool";
+
     /// <summary>Gets or sets the folder of the inputs and the jobs.</summary>
     public string WorkDirectory { get; set; } = "work";
 
@@ -70,6 +73,9 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets where the renditions are written.</summary>
     public HlsTargetSettings? Hls { get; set; }
 
+    /// <summary>Gets or sets where the media added to each library goes by default.</summary>
+    public List<LibrarySettings> Libraries { get; set; } = [];
+
     /// <summary>Gets the folder of the cached inputs.</summary>
     [JsonIgnore]
     public string InputDirectory => Path.Combine(WorkDirectory, "inputs");
@@ -77,6 +83,10 @@ public sealed class WorkerSettings
     /// <summary>Gets the folder of the jobs.</summary>
     [JsonIgnore]
     public string JobDirectory => Path.Combine(WorkDirectory, "jobs");
+
+    /// <summary>Gets the database of the media this worker added or downloaded.</summary>
+    [JsonIgnore]
+    public string DatabasePath => Path.Combine(WorkDirectory, "worker.db");
 
     /// <summary>
     /// Reads and validates the settings. Relative paths are relative to the folder of the file.
@@ -196,13 +206,37 @@ public sealed class WorkerSettings
         {
             Hls.Validate(GetConnection(Hls.Connection));
         }
+
+        if (Libraries is null || Libraries.Any(l => l is null))
+        {
+            throw new ArgumentException("Libraries 应为对象数组。");
+        }
+
+        if (Libraries.GroupBy(l => l.Id).FirstOrDefault(g => g.Count() > 1) is { } repeated)
+        {
+            throw new ArgumentException("媒体库重复：" + repeated.Key);
+        }
+
+        foreach (var library in Libraries)
+        {
+            library.Validate(this);
+        }
     }
+
+    /// <summary>
+    /// Gets the default of a library, or one that puts the media directly into its folder.
+    /// </summary>
+    /// <param name="libraryId">The library.</param>
+    /// <returns>The default.</returns>
+    public LibrarySettings GetLibrary(Guid libraryId)
+        => Libraries.FirstOrDefault(l => l.Id.Equals(libraryId)) ?? new LibrarySettings { Id = libraryId };
 
     private void Resolve(string directory)
     {
         WorkDirectory = Path.GetFullPath(WorkDirectory, directory);
         Ffmpeg = ResolveProgram(Ffmpeg, directory);
         Ffprobe = ResolveProgram(Ffprobe, directory);
+        TrueCacheTool = ResolveProgram(TrueCacheTool, directory);
         foreach (var connection in Connections ?? [])
         {
             if (connection?.Type == ConnectionType.Local && !string.IsNullOrWhiteSpace(connection.LocalRoot))

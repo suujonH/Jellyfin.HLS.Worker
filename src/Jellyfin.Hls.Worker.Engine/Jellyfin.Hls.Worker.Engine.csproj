@@ -9,5 +9,6 @@
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.4" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 </Project>

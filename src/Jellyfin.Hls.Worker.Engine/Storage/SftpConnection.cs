@@ -103,14 +103,36 @@ internal sealed class SftpConnection : StorageConnection
                     await client.UploadFileAsync(from, temporary, cancellationToken).ConfigureAwait(false);
                 }
 
-                // SFTP version 3 does not rename onto an existing file; a file left by an earlier attempt goes first.
+                // SFTP version 3 does not rename onto an existing file; the file there is moved aside until the new one is in
+                // place, and put back when it cannot be.
+                string? previous = null;
                 if (await client.ExistsAsync(destination, cancellationToken).ConfigureAwait(false))
                 {
-                    await client.DeleteFileAsync(destination, cancellationToken).ConfigureAwait(false);
+                    previous = GetTemporaryName(destination);
+                    await client.RenameFileAsync(destination, previous, cancellationToken).ConfigureAwait(false);
                 }
 
-                await client.RenameFileAsync(temporary, destination, cancellationToken).ConfigureAwait(false);
-                temporary = null;
+                try
+                {
+                    await client.RenameFileAsync(temporary, destination, cancellationToken).ConfigureAwait(false);
+                    temporary = null;
+                }
+                catch when (previous is not null && client.IsConnected)
+                {
+                    await client.RenameFileAsync(previous, destination, CancellationToken.None).ConfigureAwait(false);
+                    throw;
+                }
+
+                if (previous is not null)
+                {
+                    try
+                    {
+                        await client.DeleteFileAsync(previous, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (SshException)
+                    {
+                    }
+                }
             }
             finally
             {
@@ -141,7 +163,54 @@ internal sealed class SftpConnection : StorageConnection
             }
         }
 
+        public async Task<bool> MoveDirectoryAsync(string path, string newPath, CancellationToken cancellationToken)
+        {
+            var source = root + "/" + path;
+            if (!await client.ExistsAsync(source, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            var destination = root + "/" + newPath;
+            await CreateDirectoryAsync(destination[..destination.LastIndexOf('/')], cancellationToken).ConfigureAwait(false);
+            await client.RenameFileAsync(source, destination, cancellationToken).ConfigureAwait(false);
+            _directories.RemoveWhere(d => d == source || d.StartsWith(source + "/", StringComparison.Ordinal));
+            return true;
+        }
+
+        public async Task DeleteDirectoryAsync(string path, CancellationToken cancellationToken)
+        {
+            var directory = root + "/" + path;
+            if (await client.ExistsAsync(directory, cancellationToken).ConfigureAwait(false))
+            {
+                await DeleteTreeAsync(directory, cancellationToken).ConfigureAwait(false);
+                _directories.RemoveWhere(d => d == directory || d.StartsWith(directory + "/", StringComparison.Ordinal));
+            }
+        }
+
         public void Dispose() => client.Dispose();
+
+        private async Task DeleteTreeAsync(string directory, CancellationToken cancellationToken)
+        {
+            await foreach (var file in client.ListDirectoryAsync(directory, cancellationToken).ConfigureAwait(false))
+            {
+                if (file.Name is "." or "..")
+                {
+                    continue;
+                }
+
+                if (file.IsDirectory)
+                {
+                    await DeleteTreeAsync(file.FullName, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await client.DeleteFileAsync(file.FullName, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            await client.DeleteDirectoryAsync(directory, cancellationToken).ConfigureAwait(false);
+        }
 
         // mkdir -p below the root; the root itself has to exist, like the directory of a local connection.
         private async Task CreateDirectoryAsync(string directory, CancellationToken cancellationToken)

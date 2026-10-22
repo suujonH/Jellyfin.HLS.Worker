@@ -124,3 +124,19 @@ public sealed record RenditionSummary(
     string Title = "",
     int Channels = 0,
     bool Default = false);
+
+/// <summary>A library of the server with its folders, as <c>GET /Library/VirtualFolders</c> returns it.</summary>
+public sealed record VirtualFolder(string Name, string ItemId, IReadOnlyList<string> Locations);
+
+/// <summary>An access of the network storage of the server; secrets are not returned.</summary>
+public sealed record NetworkStorageAccess(
+    Guid Id,
+    string Protocol,
+    string? Name,
+    string? Endpoint,
+    string Bucket,
+    string? Region,
+    bool UsePathStyle,
+    string? AccessKey,
+    string? SecretKey,
+    bool IsArchive);

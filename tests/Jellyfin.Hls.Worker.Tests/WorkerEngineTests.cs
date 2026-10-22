@@ -41,7 +41,7 @@ public sealed class WorkerEngineTests : IDisposable
     [FfmpegFact]
     public async Task Run_EncodesUploadsAndReportsAJob()
     {
-        var clip = await CreateClipAsync();
+        var clip = await CreateClipAsync(_directory);
         var sha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(clip)));
         var plan = TestPlans.Plan(expectedSegments: 3, sha256: sha);
         var polled = 0;
@@ -147,7 +147,7 @@ public sealed class WorkerEngineTests : IDisposable
     [FfmpegFact]
     public async Task Run_ReportsAPlanForAnotherFile_AsFailed()
     {
-        var clip = await CreateClipAsync();
+        var clip = await CreateClipAsync(_directory);
         string? failure = null;
         var polled = 0;
         var server = new FakeServer(async (request, body) =>
@@ -212,11 +212,11 @@ public sealed class WorkerEngineTests : IDisposable
     }
 
     // 13.5 seconds of 640x360 at 25 fps with a stereo track that ends after 8 seconds and a text subtitle: streams 0, 1 and 2.
-    private async Task<string> CreateClipAsync()
+    internal static async Task<string> CreateClipAsync(string directory, string name = "clip.mkv")
     {
-        var srt = Path.Combine(_directory, "clip.srt");
+        var srt = Path.Combine(directory, "clip.srt");
         await File.WriteAllTextAsync(srt, "1\n00:00:01,000 --> 00:00:03,000\nHello\n\n2\n00:00:07,000 --> 00:00:09,000\nWorld\n");
-        var clip = Path.Combine(_directory, "clip.mkv");
+        var clip = Path.Combine(directory, name);
         await ProcessRunner.RunAsync(
             "ffmpeg",
             [
