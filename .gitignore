@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+artifacts/
+worker.local.json
+*.user
+.vs/
