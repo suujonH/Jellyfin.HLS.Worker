@@ -96,6 +96,26 @@ public sealed class WorkerSettings
     /// <exception cref="ArgumentException">The settings are not valid.</exception>
     public static WorkerSettings Load(string path)
     {
+        var settings = Read(path);
+        if (Environment.GetEnvironmentVariable("JELLYFIN_HLS_API_KEY") is { Length: > 0 } apiKey)
+        {
+            settings.ApiKey = apiKey;
+        }
+
+        settings.Resolve(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        settings.Validate();
+        return settings;
+    }
+
+    /// <summary>
+    /// Reads the settings as they are written, to be edited and saved again: relative paths are kept, the API key of the
+    /// environment is not used, and nothing is checked.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <returns>The settings.</returns>
+    /// <exception cref="ArgumentException">The file is not of settings.</exception>
+    public static WorkerSettings Read(string path)
+    {
         WorkerSettings settings;
         try
         {
@@ -106,14 +126,31 @@ public sealed class WorkerSettings
             throw new ArgumentException("配置文件无效：" + ex.Message, ex);
         }
 
-        if (Environment.GetEnvironmentVariable("JELLYFIN_HLS_API_KEY") is { Length: > 0 } apiKey)
+        // A list written as null is an empty one; an item written as null is no setting; a text written as null is the default.
+        settings.Connections = settings.Connections?.Where(c => c is not null).ToList() ?? [];
+        settings.Libraries = settings.Libraries?.Where(l => l is not null).ToList() ?? [];
+        FillNulls(settings);
+        settings.Connections.ForEach(FillNulls);
+        settings.Libraries.ForEach(FillNulls);
+        if (settings.Hls is not null)
         {
-            settings.ApiKey = apiKey;
+            FillNulls(settings.Hls);
         }
 
-        settings.Resolve(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        settings.Validate();
         return settings;
+    }
+
+    private static void FillNulls<T>(T item)
+        where T : new()
+    {
+        var defaults = new T();
+        foreach (var property in typeof(T).GetProperties().Where(p => p.PropertyType == typeof(string) && p.CanWrite))
+        {
+            if (property.GetValue(item) is null)
+            {
+                property.SetValue(item, property.GetValue(defaults));
+            }
+        }
     }
 
     /// <summary>

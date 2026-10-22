@@ -1,0 +1,259 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Jellyfin.Hls.Worker.Gui.ViewModels"
+        x:Class="Jellyfin.Hls.Worker.Gui.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="Jellyfin HLS Worker"
+        Width="980" Height="760" MinWidth="720" MinHeight="520"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Styles>
+        <!-- A labelled row of a form: the label on the left, the field filling the rest. -->
+        <Style Selector="DockPanel.row">
+            <Setter Property="Margin" Value="0,0,0,8" />
+        </Style>
+        <Style Selector="DockPanel.row > TextBlock:nth-child(1)">
+            <Setter Property="Width" Value="170" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="DockPanel.Dock" Value="Left" />
+        </Style>
+        <Style Selector="ListBox#LogList ListBoxItem">
+            <Setter Property="Padding" Value="8,1" />
+            <Setter Property="MinHeight" Value="0" />
+        </Style>
+        <Style Selector="TextBlock.section">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,12,0,8" />
+        </Style>
+        <Style Selector="TextBlock.hint">
+            <Setter Property="Opacity" Value="0.7" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="170,-4,0,8" />
+        </Style>
+    </Window.Styles>
+
+    <Grid RowDefinitions="*,Auto,160,Auto">
+        <!-- Pages that are hidden rather than taken out, so a field of one not shown still tells of a value that is not one. -->
+        <DockPanel Grid.Row="0" Margin="8,4,8,0">
+          <TabStrip DockPanel.Dock="Top" x:Name="Pages" SelectedIndex="0">
+            <TabStripItem Content="运行" />
+            <TabStripItem Content="添加媒体" />
+            <TabStripItem Content="设置" />
+          </TabStrip>
+          <Panel>
+            <Panel x:Name="RunPage">
+                <StackPanel Margin="8" Spacing="12">
+                    <TextBlock Text="{Binding ConfigPath, StringFormat='配置文件：{0}'}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="开始领取任务" Command="{Binding StartCommand}" Classes="accent" />
+                        <Button Content="停止" Command="{Binding StopCommand}" />
+                        <Button Content="检查配置" Command="{Binding CheckCommand}"
+                                ToolTip.Tip="实际测试编码器、服务器、各连接和 HLS 根，不领取任务" />
+                    </StackPanel>
+                    <TextBlock TextWrapping="Wrap" Classes="hint" Margin="0"
+                               Text="开始后常驻领取并处理服务器的任务；停止时进行中的任务被中止，由服务器重新安排。添加媒体时随添加的编码优先。" />
+                </StackPanel>
+            </Panel>
+
+            <Panel x:Name="AddPage" IsVisible="False">
+                <Grid ColumnDefinitions="*,16,*" Margin="8" DataContext="{Binding Add}" x:DataType="vm:AddViewModel">
+                    <ScrollViewer Grid.Column="0">
+                        <StackPanel>
+                            <DockPanel Classes="row">
+                                <TextBlock Text="媒体库" />
+                                <Button DockPanel.Dock="Right" Content="刷新" Margin="8,0,0,0" Command="{Binding RefreshCommand}" />
+                                <ComboBox ItemsSource="{Binding Libraries}" SelectedItem="{Binding SelectedLibrary}" HorizontalAlignment="Stretch">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:LibraryOption">
+                                            <TextBlock Text="{Binding Name}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </DockPanel>
+                            <TextBlock Classes="hint" Text="{Binding SelectedLibrary.Locations, FallbackValue='点“刷新”从服务器读取媒体库'}" />
+
+                            <DockPanel Classes="row">
+                                <TextBlock Text="视频放到" />
+                                <ComboBox ItemsSource="{Binding Destinations}" SelectedItem="{Binding SelectedDestination}" HorizontalAlignment="Stretch">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:DestinationOption">
+                                            <TextBlock Text="{Binding Label}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </DockPanel>
+                            <DockPanel Classes="row" IsVisible="{Binding IsS3}">
+                                <TextBlock Text="S3 前缀" />
+                                <TextBox Text="{Binding Prefix}" PlaceholderText="桶中的目录，例如 media/movies" />
+                            </DockPanel>
+                            <DockPanel Classes="row">
+                                <TextBlock Text="媒体库中的子目录" />
+                                <TextBox Text="{Binding Into}" PlaceholderText="留空即媒体库目录本身" />
+                            </DockPanel>
+                            <TextBlock Classes="hint" Text="其他文件（字幕、图片、nfo）总是复制进媒体库目录；文件夹连同文件夹名添加。" />
+
+                            <TextBlock Classes="section" Text="随添加编码" />
+                            <TextBlock Classes="hint" Margin="0,0,0,8" IsVisible="{Binding !IsEncoded}"
+                                       Text="这个媒体库没有启用预编码。" />
+                            <ItemsControl ItemsSource="{Binding Qualities}" IsVisible="{Binding IsEncoded}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:QualityOption">
+                                        <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" Margin="0,0,16,0" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Classes="hint" Margin="0,0,0,8" IsVisible="{Binding IsEncoded}"
+                                       Text="勾选的档位立即编码；其余档位在服务器扫描入库后按普通任务编码。" />
+
+                            <CheckBox Content="记住为这个媒体库的默认去处" IsChecked="{Binding Remember}" Margin="0,8,0,8" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="添加到媒体库" Classes="accent" Command="{Binding AddCommand}" />
+                                <Button Content="取消" Command="{Binding CancelCommand}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <DockPanel Grid.Column="2">
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                            <Button Content="添加文件…" Click="OnAddFilesClick" />
+                            <Button Content="添加文件夹…" Click="OnAddFolderClick" />
+                            <Button Content="移除" Command="{Binding RemoveFileCommand}" />
+                            <Button Content="清空" Command="{Binding ClearFilesCommand}" />
+                        </StackPanel>
+                        <ListBox ItemsSource="{Binding Files}" SelectedItem="{Binding SelectedFile}" DragDrop.AllowDrop="True" x:Name="FileList" />
+                    </DockPanel>
+                </Grid>
+            </Panel>
+
+            <Panel x:Name="SettingsPage" IsVisible="False">
+                <DockPanel Margin="8">
+                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                        <Button Content="保存" Classes="accent" Command="{Binding SaveCommand}" />
+                        <Button Content="打开其他配置…" Click="OnOpenConfigClick" />
+                    </StackPanel>
+                    <ScrollViewer>
+                        <StackPanel Margin="0,0,16,0">
+                            <TextBlock Classes="section" Text="服务器" Margin="0,0,0,8" />
+                            <DockPanel Classes="row"><TextBlock Text="地址" /><TextBox Text="{Binding Settings.Server}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="API Key" /><TextBox Text="{Binding Settings.ApiKey}" PasswordChar="●" /></DockPanel>
+                            <TextBlock Classes="hint" Text="管理员在控制台“API 密钥”中创建；也可以由环境变量 JELLYFIN_HLS_API_KEY 提供。" />
+                            <DockPanel Classes="row"><TextBlock Text="Worker 名称" /><TextBox Text="{Binding Settings.Name}" /></DockPanel>
+
+                            <TextBlock Classes="section" Text="程序与目录" />
+                            <DockPanel Classes="row"><TextBlock Text="ffmpeg" /><TextBox Text="{Binding Settings.Ffmpeg}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="ffprobe" /><TextBox Text="{Binding Settings.Ffprobe}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="TrueCache 工具" /><TextBox Text="{Binding Settings.TrueCacheTool}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="工作目录" /><TextBox Text="{Binding Settings.WorkDirectory}" /></DockPanel>
+                            <TextBlock Classes="hint" Text="相对路径相对于配置文件所在的目录。" />
+
+                            <TextBlock Classes="section" Text="编码" />
+                            <DockPanel Classes="row">
+                                <TextBlock Text="编码器" />
+                                <ComboBox ItemsSource="{Binding Encoders}" SelectedItem="{Binding Settings.Encoder}" HorizontalAlignment="Stretch" />
+                            </DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="硬件设备" /><TextBox Text="{Binding Settings.HardwareDevice}" PlaceholderText="vaapi 的渲染节点，例如 /dev/dri/renderD128" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="线程数" /><TextBox Text="{Binding Settings.Threads}" PlaceholderText="0 为自动" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="同时编码" /><TextBox Text="{Binding Settings.Concurrency}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="同时上传" /><TextBox Text="{Binding Settings.UploadConcurrency}" /></DockPanel>
+
+                            <TextBlock Classes="section" Text="其他" />
+                            <DockPanel Classes="row"><TextBlock Text="领取间隔（秒）" /><TextBox Text="{Binding Settings.PollSeconds}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="请求超时（秒）" /><TextBox Text="{Binding Settings.ControlTimeoutSeconds}" /></DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="输入缓存（GiB）" /><TextBox Text="{Binding Settings.InputCacheGiB}" /></DockPanel>
+                            <CheckBox Content="保留失败任务的工作目录" IsChecked="{Binding Settings.KeepFailedJobs}" Margin="170,0,0,8" />
+
+                            <TextBlock Classes="section" Text="HLS 根" />
+                            <DockPanel Classes="row">
+                                <TextBlock Text="连接" />
+                                <ComboBox ItemsSource="{Binding Connections}" SelectedItem="{Binding HlsConnection}" HorizontalAlignment="Stretch">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:ConnectionViewModel">
+                                            <TextBlock Text="{Binding Name}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </DockPanel>
+                            <DockPanel Classes="row"><TextBlock Text="目录" /><TextBox Text="{Binding Settings.Hls.Path}" PlaceholderText="连接中的目录，例如 hls" /></DockPanel>
+                            <TextBlock Classes="hint" Text="编码成果上传到这里；它在服务器上的位置（S3 地址或服务器路径）上报给服务器。" />
+
+                            <TextBlock Classes="section" Text="连接" />
+                            <Grid ColumnDefinitions="180,16,*">
+                                <DockPanel Grid.Column="0">
+                                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                                        <Button Content="新建" Command="{Binding NewConnectionCommand}" />
+                                        <Button Content="删除" Command="{Binding RemoveConnectionCommand}" />
+                                    </StackPanel>
+                                    <ListBox ItemsSource="{Binding Connections}" SelectedItem="{Binding SelectedConnection}" MinHeight="160" AutoScrollToSelectedItem="False">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate x:DataType="vm:ConnectionViewModel">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Name}" />
+                                                    <TextBlock Text="{Binding Type}" Opacity="0.7" FontSize="12" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </DockPanel>
+
+                                <StackPanel Grid.Column="2" DataContext="{Binding SelectedConnection}" x:DataType="vm:ConnectionViewModel"
+                                            IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).SelectedConnection, Converter={x:Static ObjectConverters.IsNotNull}}">
+                                    <DockPanel Classes="row"><TextBlock Text="名称" /><TextBox Text="{Binding Name}" /></DockPanel>
+                                    <DockPanel Classes="row">
+                                        <TextBlock Text="类型" />
+                                        <ComboBox ItemsSource="{Binding $parent[Window].((vm:MainViewModel)DataContext).ConnectionTypes}"
+                                                  SelectedItem="{Binding Type}" HorizontalAlignment="Stretch" />
+                                    </DockPanel>
+
+                                    <StackPanel IsVisible="{Binding IsS3}">
+                                        <DockPanel Classes="row"><TextBlock Text="Endpoint" /><TextBox Text="{Binding Model.Endpoint}" PlaceholderText="https://s3.example.com" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Region" /><TextBox Text="{Binding Model.Region}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Bucket" /><TextBox Text="{Binding Model.Bucket}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Access Key" /><TextBox Text="{Binding Model.AccessKey}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Secret Key" /><TextBox Text="{Binding Model.SecretKey}" PasswordChar="●" /></DockPanel>
+                                    </StackPanel>
+
+                                    <StackPanel IsVisible="{Binding IsSftp}">
+                                        <DockPanel Classes="row"><TextBlock Text="主机" /><TextBox Text="{Binding Model.Host}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="端口" /><TextBox Text="{Binding Model.Port}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="主机密钥指纹" /><TextBox Text="{Binding Model.HostKey}" PlaceholderText="SHA256:…（ssh-keygen -lf 的输出）" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="用户" /><TextBox Text="{Binding Model.User}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="密码" /><TextBox Text="{Binding Model.Password}" PasswordChar="●" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="私钥文件" /><TextBox Text="{Binding Model.PrivateKeyPath}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="私钥口令" /><TextBox Text="{Binding Model.PrivateKeyPassphrase}" PasswordChar="●" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="远端根目录" /><TextBox Text="{Binding Model.RemoteRoot}" PlaceholderText="/srv/media" /></DockPanel>
+                                    </StackPanel>
+
+                                    <StackPanel IsVisible="{Binding IsLocal}">
+                                        <DockPanel Classes="row"><TextBlock Text="本机目录" /><TextBox Text="{Binding Model.LocalRoot}" /></DockPanel>
+                                    </StackPanel>
+
+                                    <StackPanel IsVisible="{Binding !IsS3}">
+                                        <DockPanel Classes="row"><TextBlock Text="在服务器上的路径" /><TextBox Text="{Binding Model.ServerRoot}" /></DockPanel>
+                                        <TextBlock Classes="hint" Text="这个根目录在 Jellyfin 服务器上的路径：媒体库目录由此映射，HLS 根放在这里时也由此得出上报的位置。" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
+            </Panel>
+          </Panel>
+        </DockPanel>
+
+        <GridSplitter Grid.Row="1" Height="6" ResizeDirection="Rows" Background="Transparent" />
+        <ListBox Grid.Row="2" x:Name="LogList" ItemsSource="{Binding Log}" Margin="8,0,8,0" FontFamily="Cascadia Mono,Consolas,monospace" FontSize="12">
+            <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="x:String">
+                    <SelectableTextBlock Text="{Binding}" TextWrapping="Wrap" />
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+        <TextBlock Grid.Row="3" Text="{Binding Status}" Margin="12,6" TextTrimming="CharacterEllipsis" />
+    </Grid>
+</Window>
