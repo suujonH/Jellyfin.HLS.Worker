@@ -111,6 +111,32 @@ public sealed class ServerClient : IDisposable
         => await SendAsync<EagerResponse>(HttpMethod.Post, "HlsWorker/Jobs/Eager", request, cancellationToken).ConfigureAwait(false)
             ?? throw new ServerException(HttpStatusCode.NoContent, "服务器没有返回预编码任务。");
 
+    /// <summary>Gets the libraries of the server with their folders.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The libraries.</returns>
+    public async Task<IReadOnlyList<VirtualFolder>> GetVirtualFoldersAsync(CancellationToken cancellationToken)
+        => await SendAsync<List<VirtualFolder>>(HttpMethod.Get, "Library/VirtualFolders", null, cancellationToken).ConfigureAwait(false) ?? [];
+
+    /// <summary>Gets the accesses of the network storage of the server.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The accesses, without secrets.</returns>
+    public async Task<IReadOnlyList<NetworkStorageAccess>> GetAccessesAsync(CancellationToken cancellationToken)
+        => await SendAsync<List<NetworkStorageAccess>>(HttpMethod.Get, "NetworkStorage/Accesses", null, cancellationToken).ConfigureAwait(false) ?? [];
+
+    /// <summary>Adds an access to the network storage of the server.</summary>
+    /// <param name="access">The access, with its secret.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task AddAccessAsync(NetworkStorageAccess access, CancellationToken cancellationToken)
+        => SendAsync<object>(HttpMethod.Post, "NetworkStorage/Accesses", access, cancellationToken);
+
+    /// <summary>Asks the server to scan a library for new and changed files.</summary>
+    /// <param name="itemId">The item of the library.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task RefreshAsync(Guid itemId, CancellationToken cancellationToken)
+        => SendAsync<object>(HttpMethod.Post, "Items/" + itemId.ToString("N") + "/Refresh?metadataRefreshMode=Default&imageRefreshMode=Default", null, cancellationToken);
+
     /// <summary>Extends the lease of a job.</summary>
     /// <param name="jobId">The job.</param>
     /// <param name="leaseToken">The lease token.</param>

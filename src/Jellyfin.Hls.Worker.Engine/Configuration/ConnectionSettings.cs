@@ -189,3 +189,44 @@ public sealed class HlsTargetSettings
         };
     }
 }
+
+/// <summary>
+/// Where the media added to a library goes: an S3 connection, the objects referred to by .strm files in the folder of the
+/// library, or the folder of the library itself.
+/// </summary>
+public sealed class LibrarySettings
+{
+    /// <summary>Gets or sets the library.</summary>
+    public Guid Id { get; set; }
+
+    /// <summary>Gets or sets the S3 connection of the media; empty puts the media into the folder of the library.</summary>
+    public string Connection { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the prefix of the objects in the bucket, with forward slashes; may be empty.</summary>
+    public string Prefix { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Checks the default.
+    /// </summary>
+    /// <param name="settings">The settings it is part of.</param>
+    /// <exception cref="ArgumentException">The default is not valid.</exception>
+    public void Validate(WorkerSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        if (Id.Equals(Guid.Empty))
+        {
+            throw new ArgumentException("Libraries 中每一项都需要媒体库的 Id。");
+        }
+
+        if (Connection.Length > 0 && settings.GetConnection(Connection).Type != ConnectionType.S3)
+        {
+            throw new ArgumentException("媒体库 " + Id + " 的 Connection 应为 S3 连接；直接放进媒体库目录时留空。");
+        }
+
+        var prefix = Prefix.Trim('/');
+        if (prefix.Length > 0 && !StoragePath.IsValidRelative(prefix))
+        {
+            throw new ArgumentException("媒体库 " + Id + " 的 Prefix 应为相对路径，使用 /。");
+        }
+    }
+}

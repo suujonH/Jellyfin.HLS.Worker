@@ -51,6 +51,21 @@ public sealed class StorageTests : IDisposable
     }
 
     [Fact]
+    public async Task MoveDirectory_TellsWhetherThereWasOne()
+    {
+        using var connection = Local();
+        using var session = await connection.OpenAsync(CancellationToken.None);
+        var local = Path.Combine(_directory, "files", "x");
+        File.WriteAllText(local, "x");
+        await session.PutAsync("a/b/x", local, CancellationToken.None);
+
+        Assert.False(await session.MoveDirectoryAsync("a/missing", "a/c", CancellationToken.None));
+        Assert.True(await session.MoveDirectoryAsync("a/b", "d/e", CancellationToken.None));
+        Assert.True(File.Exists(Path.Combine(_directory, "root", "d", "e", "x")));
+        Assert.False(Directory.Exists(Path.Combine(_directory, "root", "a", "b")));
+    }
+
+    [Fact]
     public async Task Upload_ToAMissingRoot_Fails()
     {
         using var connection = StorageConnection.Create(

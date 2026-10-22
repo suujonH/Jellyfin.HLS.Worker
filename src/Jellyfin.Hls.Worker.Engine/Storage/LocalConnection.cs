@@ -64,6 +64,31 @@ internal sealed class LocalConnection : StorageConnection
             return Task.CompletedTask;
         }
 
+        public Task<bool> MoveDirectoryAsync(string path, string newPath, CancellationToken cancellationToken)
+        {
+            var source = Resolve(path);
+            if (!Directory.Exists(source))
+            {
+                return Task.FromResult(false);
+            }
+
+            var destination = Resolve(newPath);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)!);
+            Directory.Move(source, destination);
+            return Task.FromResult(true);
+        }
+
+        public Task DeleteDirectoryAsync(string path, CancellationToken cancellationToken)
+        {
+            var directory = Resolve(path);
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, true);
+            }
+
+            return Task.CompletedTask;
+        }
+
         public void Dispose()
         {
         }
