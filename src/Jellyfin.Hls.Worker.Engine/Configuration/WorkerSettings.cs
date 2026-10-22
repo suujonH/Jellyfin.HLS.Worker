@@ -11,6 +11,9 @@ public sealed class WorkerSettings
     /// <summary>The H.264 encoders the worker can drive.</summary>
     public static readonly IReadOnlyList<string> Encoders = ["libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi"];
 
+    /// <summary>The TrueCache tool by its name, which is the one published with the worker when there is one.</summary>
+    public const string DefaultTrueCacheTool = "Jellyfin.TrueCache.Tool";
+
     private static readonly JsonSerializerOptions _json = new()
     {
         WriteIndented = true,
@@ -34,8 +37,11 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets the ffprobe executable.</summary>
     public string Ffprobe { get; set; } = "ffprobe";
 
-    /// <summary>Gets or sets the TrueCache tool, which writes the entries of the media put on S3.</summary>
-    public string TrueCacheTool { get; set; } = "Jellyfin.TrueCache.Tool";
+    /// <summary>
+    /// Gets or sets the TrueCache tool, which writes the entries of the media put on S3. The default is the tool in the folder
+    /// truecache next to the worker, or the one on the PATH.
+    /// </summary>
+    public string TrueCacheTool { get; set; } = DefaultTrueCacheTool;
 
     /// <summary>Gets or sets the folder of the inputs and the jobs.</summary>
     public string WorkDirectory { get; set; } = "work";
@@ -84,7 +90,7 @@ public sealed class WorkerSettings
     [JsonIgnore]
     public string JobDirectory => Path.Combine(WorkDirectory, "jobs");
 
-    /// <summary>Gets the database of the media this worker added or downloaded.</summary>
+    /// <summary>Gets the database of the media this worker added.</summary>
     [JsonIgnore]
     public string DatabasePath => Path.Combine(WorkDirectory, "worker.db");
 
@@ -273,7 +279,9 @@ public sealed class WorkerSettings
         WorkDirectory = Path.GetFullPath(WorkDirectory, directory);
         Ffmpeg = ResolveProgram(Ffmpeg, directory);
         Ffprobe = ResolveProgram(Ffprobe, directory);
-        TrueCacheTool = ResolveProgram(TrueCacheTool, directory);
+        TrueCacheTool = TrueCacheTool == DefaultTrueCacheTool && File.Exists(BundledTrueCacheTool)
+            ? BundledTrueCacheTool
+            : ResolveProgram(TrueCacheTool, directory);
         foreach (var connection in Connections ?? [])
         {
             if (connection?.Type == ConnectionType.Local && !string.IsNullOrWhiteSpace(connection.LocalRoot))
@@ -287,6 +295,12 @@ public sealed class WorkerSettings
             }
         }
     }
+
+    /// <summary>Gets the TrueCache tool published with the worker, in the folder truecache next to it.</summary>
+    internal static string BundledTrueCacheTool => Path.Combine(
+        AppContext.BaseDirectory,
+        "truecache",
+        OperatingSystem.IsWindows() ? DefaultTrueCacheTool + ".exe" : DefaultTrueCacheTool);
 
     // A bare name is looked up on the PATH; anything with a separator is a path.
     private static string ResolveProgram(string program, string directory)

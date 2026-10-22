@@ -1,0 +1,23 @@
+[Unit]
+Description=Jellyfin HLS Worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=jellyfin-hls
+Group=jellyfin-hls
+WorkingDirectory=/var/lib/jellyfin-hls-worker
+# The API key can be given here instead of the settings file: JELLYFIN_HLS_API_KEY=...
+EnvironmentFile=-/etc/jellyfin-hls-worker/environment
+ExecStart=/opt/jellyfin-hls-worker/jellyfin-hls-worker run --config /etc/jellyfin-hls-worker/worker.json
+# 130 is the exit of a worker stopped by SIGTERM; 2 is a settings error, which a restart does not mend.
+SuccessExitStatus=130
+RestartPreventExitStatus=2
+Restart=on-failure
+RestartSec=30
+# The jobs in progress are stopped and reported before the worker exits.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
