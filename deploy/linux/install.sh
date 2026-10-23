@@ -19,6 +19,13 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# The package is framework-dependent: nothing is installed until the worker starts on the runtime of this machine.
+chmod 755 "$package/jellyfin-hls-worker"
+if ! "$package/jellyfin-hls-worker" --version >/dev/null 2>&1; then
+    echo "无法启动 Worker：需要安装 .NET 10 运行时和 ASP.NET Core 10 运行时（例如 aspnetcore-runtime-10.0 包），且安装在系统位置。" >&2
+    exit 1
+fi
+
 # The group of the same name is made first: useradd does not make it on every system.
 if ! getent group "$user" >/dev/null; then
     groupadd --system "$user"

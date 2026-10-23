@@ -1,4 +1,5 @@
-# Publishes self-contained packages of the worker, its desktop app and the TrueCache tool into artifacts/.
+# Publishes framework-dependent packages of the worker, its desktop app and the TrueCache tool into artifacts/;
+# they run on an installed .NET 10 runtime and ASP.NET Core 10 runtime.
 #   ./scripts/publish.ps1 -Jellyfin ../jellyfin [-Runtime win-x64,linux-x64,linux-arm64]
 param(
     # The jellyfin repository, whose src/Jellyfin.TrueCache.Tool is published with the worker.
@@ -18,7 +19,7 @@ $version = (dotnet msbuild (Join-Path $root 'src/Jellyfin.Hls.Worker/Jellyfin.Hl
 $artifacts = Join-Path $root 'artifacts'
 
 function Invoke-Publish([string]$Project, [string]$Rid, [string]$Output, [bool]$SingleFile) {
-    dotnet publish $Project -c Release -r $Rid --self-contained -o $Output "-p:PublishSingleFile=$SingleFile" -p:DebugType=none
+    dotnet publish $Project -c Release -r $Rid --self-contained false -o $Output "-p:PublishSingleFile=$SingleFile" -p:DebugType=none
     if ($LASTEXITCODE -ne 0) {
         throw "发布 $Project ($Rid) 失败"
     }

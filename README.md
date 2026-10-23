@@ -8,7 +8,11 @@ Worker 还能把本机文件**添加到媒体库**：视频放到 S3，并在媒
 
 ## 包内容
 
-发布包是自包含的，不需要安装 .NET。提供 `win-x64`、`linux-x64`、`linux-arm64` 三种。
+发布包依赖框架，需要先安装 **.NET 10 运行时**和 **ASP.NET Core 10 运行时**（TrueCache 工具运行服务器的代码，需要后者）。提供 `win-x64`、`linux-x64`、`linux-arm64` 三种。
+
+- Windows：从 [.NET 10 下载页](https://dotnet.microsoft.com/download/dotnet/10.0) 安装「.NET Runtime」和「ASP.NET Core Runtime」。
+- Linux：安装发行版或 Microsoft 软件源中的 `aspnetcore-runtime-10.0` 包，它会同时装上 .NET 运行时。
+- 运行时要装在系统位置：systemd 服务不读取用户的 `DOTNET_ROOT`。用 `dotnet --list-runtimes` 确认已有 `Microsoft.NETCore.App 10.*` 和 `Microsoft.AspNetCore.App 10.*`。
 
 | 文件 | 说明 |
 | --- | --- |
@@ -158,6 +162,7 @@ sudo sh ./install.sh
 
 `install.sh` 会做以下事情：
 
+- 先启动一次 Worker，确认本机的 .NET 10 运行时可用；不可用时不做任何改动就退出。
 - 安装到 `/opt/jellyfin-hls-worker`，并创建系统用户 `jellyfin-hls`。该用户若存在 `video`、`render` 组则加入，供硬件编码使用。
 - 工作目录为 `/var/lib/jellyfin-hls-worker`。
 - 第一次安装时在 `/etc/jellyfin-hls-worker/worker.json` 生成配置，权限为 640，只有 root 和 `jellyfin-hls` 能读。
