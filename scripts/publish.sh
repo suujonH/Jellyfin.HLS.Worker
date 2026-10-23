@@ -1,5 +1,6 @@
 #!/bin/sh
-# Publishes self-contained packages of the worker, its desktop app and the TrueCache tool into artifacts/.
+# Publishes framework-dependent packages of the worker, its desktop app and the TrueCache tool into artifacts/;
+# they run on an installed .NET 10 runtime and ASP.NET Core 10 runtime.
 #   sh scripts/publish.sh <jellyfin repository> [runtime...]     runtimes: win-x64 linux-x64 linux-arm64 (default all)
 set -eu
 
@@ -24,7 +25,7 @@ version=$(dotnet msbuild "$root/src/Jellyfin.Hls.Worker/Jellyfin.Hls.Worker.cspr
 artifacts="$root/artifacts"
 
 publish() {
-    dotnet publish "$1" -c Release -r "$2" --self-contained -o "$3" -p:PublishSingleFile="$4" -p:DebugType=none
+    dotnet publish "$1" -c Release -r "$2" --self-contained false -o "$3" -p:PublishSingleFile="$4" -p:DebugType=none
 }
 
 for rid in "$@"; do
