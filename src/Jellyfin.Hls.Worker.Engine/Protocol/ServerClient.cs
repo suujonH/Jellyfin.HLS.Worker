@@ -43,7 +43,7 @@ public sealed class ServerClient : IDisposable
         _baseAddress = new Uri(server.AbsoluteUri.TrimEnd('/') + "/");
         _authorization = new AuthenticationHeaderValue(
             "MediaBrowser",
-            $"Client=\"Jellyfin HLS Worker\", Device=\"{Environment.MachineName}\", DeviceId=\"jellyfin-hls-worker\", Version=\"1.0.0\", Token=\"{apiKey}\"");
+            $"Client=\"Jellyfin HLS Worker\", Device=\"{Environment.MachineName}\", DeviceId=\"jellyfin-hls-worker\", Version=\"0.01\", Token=\"{apiKey}\"");
         _controlTimeout = controlTimeout;
         _control = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
         _control.Timeout = Timeout.InfiniteTimeSpan;
