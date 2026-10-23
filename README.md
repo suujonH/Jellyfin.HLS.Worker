@@ -201,3 +201,9 @@ sh scripts/publish.sh ../jellyfin [win-x64 linux-x64 linux-arm64]
 ```
 
 包和压缩包输出到 `artifacts/`。
+
+### CI
+
+GitHub Actions（`.github/workflows/build.yml`）在推送到 `main` 和 PR 时运行测试并打包，三个平台的包可以在运行页面的 Artifacts 中下载。TrueCache 工具从 workflow 中 `JELLYFIN_REF` 指定的服务器版本发布，升级配套的服务器时一并修改。
+
+推送 `v*` 标签时，先确认标签与 `Directory.Build.props` 中的 `Version` 一致，再把 `.zip` 和 `.tar.gz` 附加到同名 Release；Release 不存在时创建为预发布。
