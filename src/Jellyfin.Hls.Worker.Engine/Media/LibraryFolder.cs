@@ -1,43 +1,12 @@
 using Jellyfin.Hls.Worker.Configuration;
-using Jellyfin.Hls.Worker.Protocol;
-using Jellyfin.Hls.Worker.Storage;
 
 namespace Jellyfin.Hls.Worker.Media;
 
 /// <summary>
-/// A folder of a library, reached through an SFTP or local connection.
+/// The folders of a library as the server names them.
 /// </summary>
-/// <param name="Connection">The connection.</param>
-/// <param name="ServerPath">The folder as the server knows it.</param>
-/// <param name="Path">The folder in the connection, with forward slashes; empty for its root.</param>
-public sealed record LibraryFolder(StorageConnection Connection, string ServerPath, string Path)
+public static class LibraryFolder
 {
-    /// <summary>
-    /// Finds the first folder of a library that a connection reaches: one whose <see cref="ConnectionSettings.ServerRoot"/>
-    /// (for a local connection without it, its <see cref="ConnectionSettings.LocalRoot"/>) is the folder or above it.
-    /// </summary>
-    /// <param name="library">The library.</param>
-    /// <param name="connections">The connections.</param>
-    /// <returns>The folder, or <c>null</c>.</returns>
-    public static LibraryFolder? Find(VirtualFolder library, IEnumerable<StorageConnection> connections)
-    {
-        ArgumentNullException.ThrowIfNull(library);
-        var candidates = connections.Where(c => c.Settings.Type is ConnectionType.Sftp or ConnectionType.Local).ToList();
-        foreach (var location in library.Locations)
-        {
-            foreach (var connection in candidates)
-            {
-                var root = connection.Settings.ServerRoot.Length > 0 ? connection.Settings.ServerRoot : connection.Settings.LocalRoot;
-                if (TryGetRelative(root, location, out var path))
-                {
-                    return new LibraryFolder(connection, location, path);
-                }
-            }
-        }
-
-        return null;
-    }
-
     /// <summary>
     /// Gets the path below a root of the server, with forward slashes. Windows paths are compared without case.
     /// </summary>

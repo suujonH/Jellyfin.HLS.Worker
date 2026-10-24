@@ -1,0 +1,99 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Jellyfin.Hls.Worker.Gui.ViewModels"
+        x:Class="Jellyfin.Hls.Worker.Gui.Views.AddDialog"
+        x:DataType="vm:AddDialogViewModel"
+        Title="{Binding Title}"
+        Width="620" SizeToContent="Height" CanResize="False"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+
+    <Window.DataTemplates>
+        <DataTemplate DataType="vm:SchemeOption"><TextBlock Text="{Binding Name}" /></DataTemplate>
+        <DataTemplate DataType="vm:DialogLibrary"><TextBlock Text="{Binding Name}" /></DataTemplate>
+    </Window.DataTemplates>
+
+    <Window.Styles>
+        <Style Selector="DockPanel.row">
+            <Setter Property="Margin" Value="0,0,0,8" />
+        </Style>
+        <Style Selector="DockPanel.row > TextBlock:nth-child(1)">
+            <Setter Property="Width" Value="130" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="DockPanel.Dock" Value="Left" />
+        </Style>
+        <Style Selector="DockPanel.row > ComboBox">
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+        </Style>
+        <Style Selector="CheckBox.option">
+            <Setter Property="Margin" Value="130,0,0,8" />
+        </Style>
+        <Style Selector="TextBlock.error">
+            <Setter Property="Foreground" Value="#D13438" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Window.Styles>
+
+    <DockPanel Margin="16">
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,12,0,0">
+            <Button Content="{Binding AcceptText}" Command="{Binding AcceptCommand}" Classes="accent" IsDefault="True" />
+            <Button Content="取消" Click="OnCancelClick" IsCancel="True" />
+        </StackPanel>
+
+        <StackPanel>
+            <TextBlock Text="正在从服务器读取媒体库……" IsVisible="{Binding IsLoading}" Margin="0,0,0,8" />
+            <DockPanel IsVisible="{Binding LoadError, Converter={x:Static ObjectConverters.IsNotNull}}" Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Content="重试" Command="{Binding LoadCommand}" Margin="8,0,0,0" />
+                <TextBlock Classes="error" Text="{Binding LoadError}" VerticalAlignment="Center" />
+            </DockPanel>
+
+            <DockPanel Classes="row">
+                <TextBlock Text="媒体库" />
+                <ComboBox ItemsSource="{Binding Libraries}" SelectedItem="{Binding SelectedLibrary}" />
+            </DockPanel>
+            <DockPanel Classes="row" IsVisible="{Binding ShowLocations}">
+                <TextBlock Text="写入目录" />
+                <ComboBox ItemsSource="{Binding Locations}" SelectedItem="{Binding SelectedLocation}" />
+            </DockPanel>
+
+            <StackPanel IsVisible="{Binding IsAdd}">
+                <DockPanel Classes="row">
+                    <TextBlock Text="源文件方案" />
+                    <ComboBox ItemsSource="{Binding SchemeOptions}" SelectedItem="{Binding SourceScheme}" />
+                </DockPanel>
+            </StackPanel>
+
+            <DockPanel Classes="row">
+                <TextBlock Text="HLS 方案" />
+                <ComboBox ItemsSource="{Binding SchemeOptions}" SelectedItem="{Binding HlsScheme}" />
+            </DockPanel>
+
+            <DockPanel Classes="row" IsVisible="{Binding IsAdd}">
+                <TextBlock Text="预编码" />
+                <ItemsControl ItemsSource="{Binding PreEncodeQualities}" IsEnabled="{Binding CanPreEncode}" VerticalAlignment="Center">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:QualityOptionViewModel">
+                            <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" Margin="0,0,16,0" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </DockPanel>
+
+            <DockPanel Classes="row">
+                <TextBlock Text="前缀" />
+                <TextBlock Text="{Binding PrefixText}" VerticalAlignment="Center" />
+            </DockPanel>
+            <DockPanel Classes="row" IsVisible="{Binding IsAdd}">
+                <TextBlock Text="文件" />
+                <TextBlock Text="{Binding PathsText}" VerticalAlignment="Center" />
+            </DockPanel>
+            <ListBox ItemsSource="{Binding Paths}" IsVisible="{Binding IsAdd}" MaxHeight="140" Margin="130,0,0,8" />
+            <TextBlock Classes="hint" Opacity="0.7" TextWrapping="Wrap" IsVisible="{Binding IsStart}" Margin="0,0,0,8"
+                       Text="切换媒体库可分别为每个媒体库选择 HLS 方案；未配置的媒体库的任务将被跳过。" />
+
+            <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding Error, Converter={x:Static ObjectConverters.IsNotNull}}" />
+        </StackPanel>
+    </DockPanel>
+</Window>

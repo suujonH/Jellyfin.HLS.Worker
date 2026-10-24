@@ -12,7 +12,7 @@ public sealed class ServerClientTests
     [Fact]
     public async Task Requests_CarryTheKeyAndTheProtocol_BelowTheBasePath()
     {
-        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new ProtocolVersion(1))));
+        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new ProtocolVersion(3))));
         using var client = new ServerClient(_server, "secret", TimeSpan.FromSeconds(5), server);
 
         await client.CheckProtocolAsync(CancellationToken.None);
@@ -20,13 +20,33 @@ public sealed class ServerClientTests
         var (request, _) = Assert.Single(server.Requests);
         Assert.Equal("/jf/HlsWorker/Protocol", request.RequestUri!.AbsolutePath);
         Assert.Contains("Token=\"secret\"", request.Headers.Authorization!.Parameter, StringComparison.Ordinal);
-        Assert.Equal("1", Assert.Single(request.Headers.GetValues(ServerClient.ProtocolHeader)));
+        Assert.Equal("3", Assert.Single(request.Headers.GetValues(ServerClient.ProtocolHeader)));
+    }
+
+    // As the server wrote it: GUIDs as 32 digits, without hyphens.
+    [Fact]
+    public async Task GetLibraries_ReadsTheGuidsOfTheServer()
+    {
+        var server = new FakeServer((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """[{"Id":"3227ce1e069754c594af25ea66d69fc7","Name":"电影","Qualities":[1080,720,480]}]""",
+                System.Text.Encoding.UTF8,
+                "application/json")
+        }));
+        using var client = new ServerClient(_server, "k", TimeSpan.FromSeconds(5), server);
+
+        var library = Assert.Single(await client.GetLibrariesAsync(CancellationToken.None));
+
+        Assert.Equal(Guid.Parse("3227ce1e-0697-54c5-94af-25ea66d69fc7"), library.Id);
+        Assert.Equal("电影", library.Name);
+        Assert.Equal("\"3227ce1e069754c594af25ea66d69fc7\"", System.Text.Json.JsonSerializer.Serialize(library.Id, ServerClient.Json));
     }
 
     [Fact]
     public async Task CheckProtocol_RefusesAnotherVersion()
     {
-        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new ProtocolVersion(2))));
+        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new ProtocolVersion(1))));
         using var client = new ServerClient(_server, "k", TimeSpan.FromSeconds(5), server);
 
         await Assert.ThrowsAsync<ServerException>(() => client.CheckProtocolAsync(CancellationToken.None));
@@ -38,8 +58,68 @@ public sealed class ServerClientTests
         var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Status(HttpStatusCode.NoContent)));
         using var client = new ServerClient(_server, "k", TimeSpan.FromSeconds(5), server);
 
-        Assert.Null(await client.PollAsync("w", CancellationToken.None));
-        Assert.Contains("\"Worker\":\"w\"", server.Requests.Single().Body, StringComparison.Ordinal);
+        var library = Guid.Parse("3227ce1e-0697-54c5-94af-25ea66d69fc7");
+
+        Assert.Null(await client.PollAsync(new WorkerRequest("w", library, [library], [], [new QualityFilter(library, [720])]), CancellationToken.None));
+        Assert.Equal(
+            """{"Worker":"w","WorkerId":"3227ce1e069754c594af25ea66d69fc7","Libraries":["3227ce1e069754c594af25ea66d69fc7"],"ExcludedItems":[],"ExcludedQualities":[{"LibraryId":"3227ce1e069754c594af25ea66d69fc7","Excluded":[720]}]}""",
+            server.Requests.Single().Body);
+    }
+
+    [Fact]
+    public async Task RegisterWorker_SendsTheIdItHas_AndReadsTheOneGiven()
+    {
+        var id = Guid.NewGuid();
+        var server = new FakeServer((_, _) => Task.FromResult(FakeServer.Json(new WorkerRegistered(id))));
+        using var client = new ServerClient(_server, "k", TimeSpan.FromSeconds(5), server);
+
+        Assert.Equal(id, await client.RegisterWorkerAsync(null, "w", CancellationToken.None));
+
+        var (request, body) = Assert.Single(server.Requests);
+        Assert.Equal((HttpMethod.Post, "/jf/HlsWorker/Workers"), (request.Method, request.RequestUri!.AbsolutePath));
+        Assert.Equal("""{"Id":null,"Name":"w"}""", body);
+    }
+
+    [Fact]
+    public async Task Upload_StartsWritesChunksAndCompletes_AtTheServer()
+    {
+        var library = Guid.NewGuid();
+        var worker = Guid.NewGuid();
+        byte[]? chunk = null;
+        var server = new FakeServer(async (request, _) =>
+        {
+            if (request.Method == HttpMethod.Put)
+            {
+                Assert.Equal("application/octet-stream", request.Content!.Headers.ContentType!.MediaType);
+                chunk = await request.Content.ReadAsByteArrayAsync();
+            }
+
+            return request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/Uploads", StringComparison.Ordinal)
+                ? FakeServer.Json(new LibraryUpload("u1"))
+                : FakeServer.Status(HttpStatusCode.NoContent);
+        });
+        using var client = new ServerClient(_server, "k", TimeSpan.FromSeconds(5), server);
+
+        Assert.Equal("u1", await client.StartUploadAsync(library, new LibraryUploadStart(null, "a/b.strm", 3, worker), CancellationToken.None));
+        await client.PutChunkAsync("u1", 16, new byte[] { 1, 2, 3 }, CancellationToken.None);
+        await client.CompleteUploadAsync("u1", "s3://b/a.mkv", CancellationToken.None);
+        await client.AbortUploadAsync("u1", CancellationToken.None);
+        await client.ReturnAsync(library, "t", CancellationToken.None);
+
+        var requests = server.Requests.ToList();
+        Assert.Equal(
+            [
+                (HttpMethod.Post, $"/jf/HlsWorker/Libraries/{library:N}/Uploads"),
+                (HttpMethod.Put, "/jf/HlsWorker/Uploads/u1"),
+                (HttpMethod.Post, "/jf/HlsWorker/Uploads/u1/Complete"),
+                (HttpMethod.Delete, "/jf/HlsWorker/Uploads/u1"),
+                (HttpMethod.Post, $"/jf/HlsWorker/Jobs/{library:N}/Return")
+            ],
+            requests.Select(r => (r.Request.Method, r.Request.RequestUri!.AbsolutePath)));
+        Assert.Contains("\"Path\":\"a/b.strm\"", requests[0].Body, StringComparison.Ordinal);
+        Assert.Equal("?offset=16", requests[1].Request.RequestUri!.Query);
+        Assert.Equal(new byte[] { 1, 2, 3 }, chunk);
+        Assert.Equal("""{"ShortcutTarget":"s3://b/a.mkv","OperationId":null}""", requests[2].Body);
     }
 
     [Theory]

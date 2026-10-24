@@ -14,7 +14,7 @@ namespace Jellyfin.Hls.Worker.Protocol;
 public sealed class ServerClient : IDisposable
 {
     /// <summary>The protocol version this worker speaks.</summary>
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 3;
 
     /// <summary>The header that names the protocol version.</summary>
     public const string ProtocolHeader = "X-Jellyfin-Hls-Protocol";
@@ -55,11 +55,11 @@ public sealed class ServerClient : IDisposable
         _download.Timeout = Timeout.InfiniteTimeSpan;
     }
 
-    /// <summary>Gets the JSON options of the protocol: the server's PascalCase names, enums as names.</summary>
+    /// <summary>Gets the JSON options of the protocol: the server's PascalCase names, enums as names, GUIDs as 32 digits.</summary>
     public static JsonSerializerOptions Json { get; } = new()
     {
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter(), new GuidConverter() }
     };
 
     /// <summary>Gets the address of the server, with a trailing slash.</summary>
@@ -82,12 +82,95 @@ public sealed class ServerClient : IDisposable
         }
     }
 
+    /// <summary>Gets the id of the worker: the one it has, which the server records when it does not know it, or a new one.</summary>
+    /// <param name="id">The id the worker has; <c>null</c> for a new one.</param>
+    /// <param name="name">The name of the worker.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The id.</returns>
+    public async Task<Guid> RegisterWorkerAsync(Guid? id, string name, CancellationToken cancellationToken)
+        => (await SendAsync<WorkerRegistered>(HttpMethod.Post, "HlsWorker/Workers", new WorkerRegistration(id, name), cancellationToken).ConfigureAwait(false)
+            ?? throw new ServerException(HttpStatusCode.NoContent, "服务器没有返回 Worker Id。")).Id;
+
     /// <summary>Claims a job.</summary>
-    /// <param name="worker">The name of the worker.</param>
+    /// <param name="request">The worker and the jobs it takes.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The job, or <c>null</c> when there is none.</returns>
-    public Task<WorkAssignment?> PollAsync(string worker, CancellationToken cancellationToken)
-        => SendAsync<WorkAssignment>(HttpMethod.Post, "HlsWorker/Poll", new WorkerRequest(worker), cancellationToken);
+    public Task<WorkAssignment?> PollAsync(WorkerRequest request, CancellationToken cancellationToken)
+        => SendAsync<WorkAssignment>(HttpMethod.Post, "HlsWorker/Poll", request, cancellationToken);
+
+    /// <summary>Gives back a job before it is identified, without counting the attempt: the worker cannot read its input.</summary>
+    /// <param name="jobId">The job.</param>
+    /// <param name="leaseToken">The lease token.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task ReturnAsync(Guid jobId, string leaseToken, CancellationToken cancellationToken)
+        => SendAsync<object>(HttpMethod.Post, JobPath(jobId, "Return"), new LeaseRequest(leaseToken), cancellationToken);
+
+    /// <summary>Starts writing a file into a folder of a library.</summary>
+    /// <param name="libraryId">The library.</param>
+    /// <param name="request">The file.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The upload.</returns>
+    public async Task<string> StartUploadAsync(Guid libraryId, LibraryUploadStart request, CancellationToken cancellationToken)
+        => (await SendAsync<LibraryUpload>(HttpMethod.Post, LibraryPath(libraryId) + "/Uploads", request, cancellationToken).ConfigureAwait(false)
+            ?? throw new ServerException(HttpStatusCode.NoContent, "服务器没有返回上传。")).UploadId;
+
+    /// <summary>Writes a chunk of an upload; a chunk sent again at the same offset replaces what follows it.</summary>
+    /// <param name="uploadId">The upload.</param>
+    /// <param name="offset">Where the chunk goes.</param>
+    /// <param name="chunk">The chunk.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task PutChunkAsync(string uploadId, long offset, ReadOnlyMemory<byte> chunk, CancellationToken cancellationToken)
+    {
+        var content = new ReadOnlyMemoryContent(chunk);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        return SendAsync<object>(
+            HttpMethod.Put,
+            UploadPath(uploadId) + "?offset=" + offset.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            content,
+            cancellationToken);
+    }
+
+    /// <summary>Ends an upload: the file is put in place, or the TrueCache entry of the zip and then the .strm file.</summary>
+    /// <param name="uploadId">The upload.</param>
+    /// <param name="shortcutTarget">The target of the .strm file when the upload is the zip of its entry; <c>null</c> for a file.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="operationId">The operation that holds the file; the server answers 409 when it no longer does.</param>
+    /// <returns>A task.</returns>
+    public Task CompleteUploadAsync(string uploadId, string? shortcutTarget, CancellationToken cancellationToken, string? operationId = null)
+        => SendAsync<object>(HttpMethod.Post, UploadPath(uploadId) + "/Complete", new LibraryUploadComplete(shortcutTarget, operationId), cancellationToken);
+
+    /// <summary>Marks a file the worker adds to a library as held by one of its operations, whatever held it before.</summary>
+    /// <param name="libraryId">The library.</param>
+    /// <param name="claim">The file and the operation.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The operation that held the file before, or <c>null</c>.</returns>
+    public async Task<string?> ClaimWorkingAsync(Guid libraryId, WorkingClaim claim, CancellationToken cancellationToken)
+        => (await SendAsync<WorkingState>(HttpMethod.Put, LibraryPath(libraryId) + "/Working", claim, cancellationToken).ConfigureAwait(false))?.OperationId;
+
+    /// <summary>Gets the operation that holds a file the worker adds to a library.</summary>
+    /// <param name="libraryId">The library.</param>
+    /// <param name="path">The file.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The operation, or <c>null</c> when the file is not marked.</returns>
+    public async Task<string?> ReadWorkingAsync(Guid libraryId, WorkingPath path, CancellationToken cancellationToken)
+        => (await SendAsync<WorkingState>(HttpMethod.Post, LibraryPath(libraryId) + "/Working/Read", path, cancellationToken).ConfigureAwait(false))?.OperationId;
+
+    /// <summary>Removes the mark of a file while it names the operation.</summary>
+    /// <param name="libraryId">The library.</param>
+    /// <param name="release">The file and the operation.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task ReleaseWorkingAsync(Guid libraryId, WorkingRelease release, CancellationToken cancellationToken)
+        => SendAsync<object>(HttpMethod.Post, LibraryPath(libraryId) + "/Working/Release", release, cancellationToken);
+
+    /// <summary>Drops an upload.</summary>
+    /// <param name="uploadId">The upload.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public Task AbortUploadAsync(string uploadId, CancellationToken cancellationToken)
+        => SendAsync<object>(HttpMethod.Delete, UploadPath(uploadId), null, cancellationToken);
 
     /// <summary>Gets the libraries that are pre-encoded.</summary>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -264,6 +347,10 @@ public sealed class ServerClient : IDisposable
 
     private static string JobPath(Guid jobId, string action) => "HlsWorker/Jobs/" + jobId.ToString("N") + "/" + action;
 
+    private static string LibraryPath(Guid libraryId) => "HlsWorker/Libraries/" + libraryId.ToString("N");
+
+    private static string UploadPath(string uploadId) => "HlsWorker/Uploads/" + Uri.EscapeDataString(uploadId);
+
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         if (response.IsSuccessStatusCode)
@@ -302,7 +389,11 @@ public sealed class ServerClient : IDisposable
         timeout.CancelAfter(_controlTimeout);
         using var request = new HttpRequestMessage(method, new Uri(_baseAddress, path));
         AddHeaders(request);
-        if (body is not null)
+        if (body is HttpContent content)
+        {
+            request.Content = content;
+        }
+        else if (body is not null)
         {
             request.Content = JsonContent.Create(body, body.GetType(), options: Json);
         }

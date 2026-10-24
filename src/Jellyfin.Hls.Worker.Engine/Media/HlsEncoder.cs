@@ -1,6 +1,7 @@
 using System.Globalization;
 using Jellyfin.Hls.Worker.Configuration;
 using Jellyfin.Hls.Worker.Protocol;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Hls.Worker.Media;
 
@@ -20,14 +21,17 @@ public sealed class HlsEncoder
     public const string PlaylistFile = "index.m3u8";
 
     private readonly WorkerSettings _settings;
+    private readonly ILogger? _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HlsEncoder"/> class.
     /// </summary>
     /// <param name="settings">The settings.</param>
-    public HlsEncoder(WorkerSettings settings)
+    /// <param name="logger">Told when the GPU fails and the video is encoded again without it; or <c>null</c>.</param>
+    public HlsEncoder(WorkerSettings settings, ILogger? logger = null)
     {
         _settings = settings;
+        _logger = logger;
     }
 
     /// <summary>
@@ -54,8 +58,9 @@ public sealed class HlsEncoder
     /// <param name="group">The group.</param>
     /// <param name="input">The input file.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="progress">Told the part of the media encoded, from 0 to 1, or <c>null</c>.</param>
     /// <returns>A task.</returns>
-    public async Task EncodeAsync(EncodePlan plan, RenditionGroup group, string input, CancellationToken cancellationToken)
+    public async Task EncodeAsync(EncodePlan plan, RenditionGroup group, string input, CancellationToken cancellationToken, Action<double>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(group);
@@ -64,15 +69,33 @@ public sealed class HlsEncoder
             Directory.CreateDirectory(directory);
         }
 
+        var gpu = group.Kind == RenditionKind.Video && UsesGpu(plan.Probe);
         var arguments = group.Kind switch
         {
-            RenditionKind.Video => VideoArguments(plan, group, input),
+            RenditionKind.Video => VideoArguments(plan, group, input, gpu),
             RenditionKind.Audio => AudioArguments(plan, group, input),
             RenditionKind.Subtitle => SubtitleArguments(plan, group, input),
             RenditionKind.Preview => PreviewArguments(plan, group, input),
             _ => throw new InvalidDataException("不支持的档位类型：" + group.Kind)
         };
-        await ProcessRunner.RunAsync(_settings.Ffmpeg, arguments, cancellationToken, group.Renditions[0].Directory).ConfigureAwait(false);
+        try
+        {
+            await RunAsync(plan, group, arguments, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex) when (gpu && !cancellationToken.IsCancellationRequested)
+        {
+            // A source the GPU cannot decode, or a driver that fails, is encoded the way every other source is.
+            _logger?.LogWarning(ex, "{MediaKey} 的视频在 GPU 上解码和缩放失败，改用 CPU 重新编码", plan.MediaKey);
+            foreach (var (_, directory) in group.Renditions)
+            {
+                Directory.Delete(directory, true);
+                Directory.CreateDirectory(directory);
+            }
+
+            progress?.Invoke(0);
+            await RunAsync(plan, group, VideoArguments(plan, group, input, false), progress, cancellationToken).ConfigureAwait(false);
+        }
+
         if (group.Kind == RenditionKind.Subtitle)
         {
             foreach (var (_, directory) in group.Renditions)
@@ -83,16 +106,44 @@ public sealed class HlsEncoder
     }
 
     /// <summary>
+    /// Gets whether the video of a source is decoded, deinterlaced and scaled on the GPU, so its frames stay in the memory of the GPU
+    /// until NVENC encodes them. The GPU path rotates nothing, has no tone mapping and converts neither the color matrix nor the range,
+    /// so it takes only SDR sources of BT.709 in limited range, without rotation; a source without a matrix counts as BT.709 when it is
+    /// HD, as players take it.
+    /// </summary>
+    /// <param name="probe">The probe of the source.</param>
+    /// <returns>Whether the GPU path is used.</returns>
+    internal bool UsesGpu(Probe probe)
+        => _settings.Encoder == "h264_nvenc"
+            && probe.ColorTransfer is not ("smpte2084" or "arib-std-b67")
+            && probe.Rotation % 360 == 0
+            && !probe.PixelFormat.StartsWith("yuvj", StringComparison.Ordinal)
+            && (probe.ColorSpace == "bt709" || (probe.ColorSpace is "" or "unknown" && probe.Height >= 720));
+
+    /// <summary>
     /// Gets the arguments of the video qualities: one decode, deinterlaced and tone mapped once, then split and scaled for each quality.
+    /// On the GPU the frames stay in its memory until they are encoded.
     /// </summary>
     /// <param name="plan">The plan.</param>
     /// <param name="group">The video renditions.</param>
     /// <param name="input">The input file.</param>
+    /// <param name="gpu">Whether the video is decoded, deinterlaced and scaled on the GPU (<see cref="UsesGpu"/>).</param>
     /// <returns>The arguments.</returns>
-    internal List<string> VideoArguments(EncodePlan plan, RenditionGroup group, string input)
+    internal List<string> VideoArguments(EncodePlan plan, RenditionGroup group, string input, bool gpu)
     {
         var vaapi = _settings.Encoder == "h264_vaapi";
         var arguments = new List<string>();
+        if (gpu)
+        {
+            arguments.AddRange(["-hwaccel", "cuda"]);
+            if (_settings.HardwareDevice.Length > 0)
+            {
+                arguments.AddRange(["-hwaccel_device", _settings.HardwareDevice]);
+            }
+
+            arguments.AddRange(["-hwaccel_output_format", "cuda"]);
+        }
+
         if (vaapi)
         {
             arguments.AddRange(["-vaapi_device", _settings.HardwareDevice]);
@@ -104,13 +155,16 @@ public sealed class HlsEncoder
         {
             // A video that ends before the media is held on its last frame, and every output is cut at the duration of the media,
             // so the video has the segments the plan expects, like the audio.
-            $"[0:{Number(plan.Probe.VideoIndex)}]{CommonFilters(plan.Probe)},tpad=stop=-1:stop_mode=clone,split={Number(count)}{string.Concat(Enumerable.Range(0, count).Select(i => $"[s{Number(i)}]"))}"
+            $"[0:{Number(plan.Probe.VideoIndex)}]{(gpu ? "bwdif_cuda=mode=send_frame:parity=auto:deint=interlaced" : CommonFilters(plan.Probe))},tpad=stop=-1:stop_mode=clone,split={Number(count)}{string.Concat(Enumerable.Range(0, count).Select(i => $"[s{Number(i)}]"))}"
         };
         for (var i = 0; i < count; i++)
         {
             var quality = Quality(group.Renditions[i].Rendition);
             // The output is tagged BT.709, so the pixels of a BT.601 source are converted to it; an HDR source is BT.709 already.
-            graph.Add($"[s{Number(i)}]scale={Number(quality.Width)}:{Number(quality.Height)}:flags=lanczos:out_color_matrix=bt709:out_range=tv,setsar=1,fps={Number(quality.FramesPerSecond)},{(vaapi ? "format=nv12,hwupload" : "format=yuv420p")}[v{Number(i)}]");
+            // The scaling on the GPU converts no matrix, which is why it takes only sources of BT.709.
+            graph.Add(gpu
+                ? $"[s{Number(i)}]scale_cuda={Number(quality.Width)}:{Number(quality.Height)}:interp_algo=lanczos:format=yuv420p,setsar=1,fps={Number(quality.FramesPerSecond)}[v{Number(i)}]"
+                : $"[s{Number(i)}]scale={Number(quality.Width)}:{Number(quality.Height)}:flags=lanczos:out_color_matrix=bt709:out_range=tv,setsar=1,fps={Number(quality.FramesPerSecond)},{(vaapi ? "format=nv12,hwupload" : "format=yuv420p")}[v{Number(i)}]");
         }
 
         arguments.AddRange(["-filter_complex", string.Join(';', graph)]);
@@ -221,6 +275,40 @@ public sealed class HlsEncoder
         arguments.AddRange(OutputArguments());
         arguments.Add(Path.Combine(group.Renditions[0].Directory, "preview.jpg"));
         return arguments;
+    }
+
+    private static async Task RunAsync(EncodePlan plan, RenditionGroup group, List<string> arguments, Action<double>? progress, CancellationToken cancellationToken)
+    {
+        if (progress is null)
+        {
+            await ProcessRunner.RunAsync(ProgramPaths.Ffmpeg, arguments, cancellationToken, group.Renditions[0].Directory).ConfigureAwait(false);
+        }
+        else
+        {
+            // ffmpeg writes key=value lines to its standard output, out_time_us being how far the output is.
+            var duration = plan.Probe.DurationSeconds;
+            arguments.InsertRange(0, ["-progress", "pipe:1", "-nostats"]);
+            await ProcessRunner.RunAsync(ProgramPaths.Ffmpeg, arguments, cancellationToken, group.Renditions[0].Directory, line => Report(line, duration, progress)).ConfigureAwait(false);
+        }
+    }
+
+    private static void Report(string line, double duration, Action<double> progress)
+    {
+        if (!(duration > 0))
+        {
+            return;
+        }
+
+        if (line == "progress=end")
+        {
+            progress(1);
+        }
+        else if (line.StartsWith("out_time_us=", StringComparison.Ordinal)
+            && long.TryParse(line.AsSpan("out_time_us=".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out var microseconds)
+            && microseconds >= 0)
+        {
+            progress(Math.Clamp(microseconds / (duration * 1e6), 0, 1));
+        }
     }
 
     // HLS players expect the cue times of WebVTT to start at the start of the media.

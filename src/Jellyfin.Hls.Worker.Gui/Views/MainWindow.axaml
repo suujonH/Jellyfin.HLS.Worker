@@ -1,11 +1,52 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Jellyfin.Hls.Worker.Gui.ViewModels"
+        xmlns:cfg="using:Jellyfin.Hls.Worker.Configuration"
         x:Class="Jellyfin.Hls.Worker.Gui.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="Jellyfin HLS Worker"
-        Width="980" Height="760" MinWidth="720" MinHeight="520"
+        Width="1080" Height="780" MinWidth="760" MinHeight="540"
         WindowStartupLocation="CenterScreen">
+
+    <Window.DataTemplates>
+        <!-- The choices of the drop-downs. -->
+        <DataTemplate DataType="vm:TargetOption"><TextBlock Text="{Binding Label}" /></DataTemplate>
+        <DataTemplate DataType="vm:SchemeOption"><TextBlock Text="{Binding Name}" /></DataTemplate>
+    </Window.DataTemplates>
+
+    <Window.Resources>
+        <!-- A line of a scheme: the directory, and whether the server is told the file is there. -->
+        <DataTemplate x:Key="EntryTemplate" x:DataType="vm:SchemeEntryViewModel">
+            <Border Classes="entry">
+                <StackPanel Spacing="6">
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="删除" Margin="8,0,0,0"
+                                Command="{Binding Scheme.RemoveEntryCommand}" CommandParameter="{Binding}" />
+                        <CheckBox DockPanel.Dock="Right" Content="申告此目录" Margin="12,0,0,0"
+                                  IsChecked="{Binding Declare}" IsEnabled="{Binding CanDeclare}" />
+                        <TextBlock Text="目录" Width="70" VerticalAlignment="Center" />
+                        <ComboBox ItemsSource="{Binding TargetOptions}" SelectedItem="{Binding SelectedTarget}" HorizontalAlignment="Stretch"
+                                  PlaceholderText="选择远程目录" />
+                    </DockPanel>
+                    <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- A file of an addition: its step, and while it runs how far the step is and the time it took and may still take. -->
+        <DataTemplate x:Key="FileTemplate" x:DataType="vm:AddFileViewModel">
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto" Margin="24,2,0,2">
+                <TextBlock Grid.Column="0" Text="{Binding Path}" ToolTip.Tip="{Binding Path}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" />
+                <TextBlock Grid.Column="1" Text="{Binding StatusText}" ToolTip.Tip="{Binding Message}" Classes="task"
+                           Classes.ok="{Binding Succeeded}" Classes.failed="{Binding HasFailed}" MaxWidth="360" TextTrimming="CharacterEllipsis" />
+                <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" Minimum="0" Maximum="100" Value="{Binding Percent}"
+                             IsVisible="{Binding HasProgress}" Margin="0,4,0,0" />
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding DetailText}" Opacity="0.7" FontSize="12" IsVisible="{Binding IsRunning}" />
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding TimeText}" Opacity="0.7" FontSize="12" IsVisible="{Binding IsRunning}"
+                           HorizontalAlignment="Right" />
+            </Grid>
+        </DataTemplate>
+    </Window.Resources>
 
     <Window.Styles>
         <!-- A labelled row of a form: the label on the left, the field filling the rest. -->
@@ -31,6 +72,62 @@
             <Setter Property="TextWrapping" Value="Wrap" />
             <Setter Property="Margin" Value="170,-4,0,8" />
         </Style>
+        <Style Selector="TextBlock.error">
+            <Setter Property="Foreground" Value="#D13438" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <!-- The result of the test of a remote directory. -->
+        <Style Selector="TextBlock.status">
+            <Setter Property="Width" Value="18" />
+            <Setter Property="TextAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Opacity" Value="0.6" />
+        </Style>
+        <Style Selector="TextBlock.status.ok">
+            <Setter Property="Foreground" Value="#107C10" />
+            <Setter Property="Opacity" Value="1" />
+        </Style>
+        <Style Selector="TextBlock.status.failed">
+            <Setter Property="Foreground" Value="#D13438" />
+            <Setter Property="Opacity" Value="1" />
+        </Style>
+        <Style Selector="TextBlock.status.testing">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="RenderTransform" Value="rotate(0deg)" />
+            <Style.Animations>
+                <Animation Duration="0:0:1" IterationCount="Infinite">
+                    <KeyFrame Cue="0%"><Setter Property="RotateTransform.Angle" Value="0" /></KeyFrame>
+                    <KeyFrame Cue="100%"><Setter Property="RotateTransform.Angle" Value="360" /></KeyFrame>
+                </Animation>
+            </Style.Animations>
+        </Style>
+
+        <!-- The state of an addition. -->
+        <Style Selector="TextBlock.task.ok">
+            <Setter Property="Foreground" Value="#107C10" />
+        </Style>
+        <Style Selector="TextBlock.task.failed">
+            <Setter Property="Foreground" Value="#D13438" />
+        </Style>
+
+        <!-- A library the server no longer has. -->
+        <Style Selector="Border.missing">
+            <Setter Property="Background" Value="#30808080" />
+        </Style>
+        <Style Selector="Border.missing TextBlock">
+            <Setter Property="TextDecorations" Value="Strikethrough" />
+            <Setter Property="Opacity" Value="0.6" />
+        </Style>
+
+        <!-- A line of a scheme. -->
+        <Style Selector="Border.entry">
+            <Setter Property="BorderBrush" Value="#40808080" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="Padding" Value="8" />
+            <Setter Property="Margin" Value="0,0,0,8" />
+        </Style>
     </Window.Styles>
 
     <Grid RowDefinitions="*,Auto,160,Auto">
@@ -40,217 +137,424 @@
             <TabStripItem Content="运行" />
             <TabStripItem Content="添加媒体" />
             <TabStripItem Content="设置" />
+            <TabStripItem Content="上传记录" />
           </TabStrip>
           <Panel>
             <Panel x:Name="RunPage">
                 <StackPanel Margin="8" Spacing="12">
-                    <TextBlock Text="{Binding ConfigPath, StringFormat='配置文件：{0}'}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding DataDirectory, StringFormat='数据目录：{0}'}" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button Content="开始领取任务" Command="{Binding StartCommand}" Classes="accent" />
                         <Button Content="停止" Command="{Binding StopCommand}" />
-                        <Button Content="检查配置" Command="{Binding CheckCommand}"
-                                ToolTip.Tip="实际测试编码器、服务器、各连接和 HLS 根，不领取任务" />
                     </StackPanel>
                     <TextBlock TextWrapping="Wrap" Classes="hint" Margin="0"
-                               Text="开始后常驻领取并处理服务器的任务；停止时进行中的任务被中止，由服务器重新安排。添加媒体时随添加的编码优先。" />
+                               Text="开始时选择各预编码媒体库的 HLS 上传方案，之后常驻领取并处理服务器的任务；停止时进行中的任务被中止，由服务器重新安排。" />
                 </StackPanel>
             </Panel>
 
-            <Panel x:Name="AddPage" IsVisible="False">
-                <Grid ColumnDefinitions="*,16,*" Margin="8" DataContext="{Binding Add}" x:DataType="vm:AddViewModel">
-                    <ScrollViewer Grid.Column="0">
-                        <StackPanel>
-                            <DockPanel Classes="row">
-                                <TextBlock Text="媒体库" />
-                                <Button DockPanel.Dock="Right" Content="刷新" Margin="8,0,0,0" Command="{Binding RefreshCommand}" />
-                                <ComboBox ItemsSource="{Binding Libraries}" SelectedItem="{Binding SelectedLibrary}" HorizontalAlignment="Stretch">
-                                    <ComboBox.ItemTemplate>
-                                        <DataTemplate x:DataType="vm:LibraryOption">
-                                            <TextBlock Text="{Binding Name}" />
-                                        </DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
-                            </DockPanel>
-                            <TextBlock Classes="hint" Text="{Binding SelectedLibrary.Locations, FallbackValue='点“刷新”从服务器读取媒体库'}" />
-
-                            <DockPanel Classes="row">
-                                <TextBlock Text="视频放到" />
-                                <ComboBox ItemsSource="{Binding Destinations}" SelectedItem="{Binding SelectedDestination}" HorizontalAlignment="Stretch">
-                                    <ComboBox.ItemTemplate>
-                                        <DataTemplate x:DataType="vm:DestinationOption">
-                                            <TextBlock Text="{Binding Label}" />
-                                        </DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
-                            </DockPanel>
-                            <DockPanel Classes="row" IsVisible="{Binding IsS3}">
-                                <TextBlock Text="S3 前缀" />
-                                <TextBox Text="{Binding Prefix}" PlaceholderText="桶中的目录，例如 media/movies" />
-                            </DockPanel>
-                            <DockPanel Classes="row">
-                                <TextBlock Text="媒体库中的子目录" />
-                                <TextBox Text="{Binding Into}" PlaceholderText="留空即媒体库目录本身" />
-                            </DockPanel>
-                            <TextBlock Classes="hint" Text="其他文件（字幕、图片、nfo）总是复制进媒体库目录；文件夹连同文件夹名添加。" />
-
-                            <TextBlock Classes="section" Text="随添加编码" />
-                            <TextBlock Classes="hint" Margin="0,0,0,8" IsVisible="{Binding !IsEncoded}"
-                                       Text="这个媒体库没有启用预编码。" />
-                            <ItemsControl ItemsSource="{Binding Qualities}" IsVisible="{Binding IsEncoded}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:QualityOption">
-                                        <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" Margin="0,0,16,0" />
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                            <TextBlock Classes="hint" Margin="0,0,0,8" IsVisible="{Binding IsEncoded}"
-                                       Text="勾选的档位立即编码；其余档位在服务器扫描入库后按普通任务编码。" />
-
-                            <CheckBox Content="记住为这个媒体库的默认去处" IsChecked="{Binding Remember}" Margin="0,8,0,8" />
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <Button Content="添加到媒体库" Classes="accent" Command="{Binding AddCommand}" />
-                                <Button Content="取消" Command="{Binding CancelCommand}" />
-                            </StackPanel>
-                        </StackPanel>
-                    </ScrollViewer>
-
-                    <DockPanel Grid.Column="2">
-                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
-                            <Button Content="添加文件…" Click="OnAddFilesClick" />
-                            <Button Content="添加文件夹…" Click="OnAddFolderClick" />
-                            <Button Content="移除" Command="{Binding RemoveFileCommand}" />
-                            <Button Content="清空" Command="{Binding ClearFilesCommand}" />
-                        </StackPanel>
-                        <ListBox ItemsSource="{Binding Files}" SelectedItem="{Binding SelectedFile}" DragDrop.AllowDrop="True" x:Name="FileList" />
-                    </DockPanel>
-                </Grid>
+            <!-- Files dropped anywhere on the page are added; the background lets the empty part take them. -->
+            <Panel x:Name="AddPage" IsVisible="False" Background="Transparent" DragDrop.AllowDrop="True">
+                <DockPanel Margin="8">
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8">
+                        <Button Content="添加文件…" Click="OnAddFilesClick" Classes="accent" />
+                        <Button Content="添加文件夹…" Click="OnAddFolderClick" />
+                        <Button Content="全部开始" Command="{Binding StartAddsCommand}" />
+                        <Button Content="全部取消" Command="{Binding CancelAllAddsCommand}" />
+                        <Button Content="清除已完成" Command="{Binding ClearFinishedAddsCommand}" />
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Classes="hint" Margin="0,8,0,8"
+                               Text="选择文件或文件夹（也可以拖到这里）后选择媒体库与上传方案，加入列表。点「全部开始」依次执行；执行中加入的会排在后面自动执行；失败或取消的项再点「全部开始」会重新执行，完成的项保持不变。文件夹连同文件夹名添加；字幕、图片、nfo 经服务器写进媒体库目录。" />
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="24,*,160,220,70" Margin="12,0,12,4" Opacity="0.7">
+                        <TextBlock Grid.Column="1" Text="内容" />
+                        <TextBlock Grid.Column="2" Text="媒体库" />
+                        <TextBlock Grid.Column="3" Text="状态" />
+                    </Grid>
+                    <ListBox ItemsSource="{Binding AddTasks}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AddTaskViewModel">
+                                <StackPanel>
+                                    <Grid ColumnDefinitions="24,*,160,220,70">
+                                        <ToggleButton Grid.Column="0" IsChecked="{Binding IsExpanded}" IsVisible="{Binding HasFiles}" Padding="0"
+                                                      Width="20" Height="20" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" VerticalAlignment="Center"
+                                                      ToolTip.Tip="显示每个文件">
+                                            <Panel>
+                                                <TextBlock Text="▸" IsVisible="{Binding !IsExpanded}" />
+                                                <TextBlock Text="▾" IsVisible="{Binding IsExpanded}" />
+                                            </Panel>
+                                        </ToggleButton>
+                                        <TextBlock Grid.Column="1" Text="{Binding Title}" ToolTip.Tip="{Binding PathsTip}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding LibraryName}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding StatusText}" ToolTip.Tip="{Binding Error}" Classes="task" Classes.ok="{Binding Succeeded}" Classes.failed="{Binding HasFailed}"
+                                                   TextTrimming="CharacterEllipsis" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <Button Grid.Column="4" Content="取消" IsVisible="{Binding IsRunning}"
+                                                Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).CancelAddTaskCommand}" CommandParameter="{Binding}" />
+                                        <Button Grid.Column="4" Content="移除" IsVisible="{Binding !IsRunning}"
+                                                Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).RemoveAddTaskCommand}" CommandParameter="{Binding}" />
+                                    </Grid>
+                                    <ContentControl Content="{Binding Current}" ContentTemplate="{StaticResource FileTemplate}" IsVisible="{Binding ShowCurrent}" />
+                                    <ItemsControl ItemsSource="{Binding Files}" ItemTemplate="{StaticResource FileTemplate}" IsVisible="{Binding IsExpanded}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
             </Panel>
 
             <Panel x:Name="SettingsPage" IsVisible="False">
                 <DockPanel Margin="8">
                     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
                         <Button Content="保存" Classes="accent" Command="{Binding SaveCommand}" />
-                        <Button Content="打开其他配置…" Click="OnOpenConfigClick" />
                     </StackPanel>
-                    <ScrollViewer>
-                        <StackPanel Margin="0,0,16,0">
-                            <TextBlock Classes="section" Text="服务器" Margin="0,0,0,8" />
-                            <DockPanel Classes="row"><TextBlock Text="地址" /><TextBox Text="{Binding Settings.Server}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="API Key" /><TextBox Text="{Binding Settings.ApiKey}" PasswordChar="●" /></DockPanel>
-                            <TextBlock Classes="hint" Text="管理员在控制台“API 密钥”中创建；也可以由环境变量 JELLYFIN_HLS_API_KEY 提供。" />
-                            <DockPanel Classes="row"><TextBlock Text="Worker 名称" /><TextBox Text="{Binding Settings.Name}" /></DockPanel>
+                    <ListBox DockPanel.Dock="Left" x:Name="SettingsSections" Width="160" SelectedIndex="0" Margin="0,0,16,0">
+                        <ListBoxItem Content="全局设置" />
+                        <ListBoxItem Content="远程目录" />
+                        <ListBoxItem Content="上传方案" />
+                        <ListBoxItem Content="媒体库配置" />
+                        <ListBoxItem Content="预编码配置" />
+                    </ListBox>
+                    <Panel>
+                        <!-- Global settings. -->
+                        <ScrollViewer x:Name="GlobalSection">
+                            <StackPanel Margin="0,0,16,0">
+                                <TextBlock Classes="section" Text="服务器" Margin="0,0,0,8" />
+                                <DockPanel Classes="row"><TextBlock Text="地址" /><TextBox Text="{Binding Settings.Server}" PlaceholderText="https://jellyfin.example.com" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="API Key" /><TextBox Text="{Binding Settings.ApiKey}" PasswordChar="●" Classes="revealPasswordButton" /></DockPanel>
+                                <TextBlock Classes="hint" Text="管理员在控制台“API 密钥”中创建；也可以由环境变量 JELLYFIN_HLS_API_KEY 提供。" />
+                                <DockPanel Classes="row"><TextBlock Text="Worker 名称" /><TextBox Text="{Binding Settings.Name}" /></DockPanel>
+                                <DockPanel Classes="row">
+                                    <TextBlock Text="Worker Id" />
+                                    <Button DockPanel.Dock="Right" Content="{Binding WorkerIdButtonText}" Command="{Binding RequestWorkerIdCommand}" Margin="8,0,0,0" />
+                                    <TextBox Text="{Binding WorkerIdText}" PlaceholderText="留空则第一次连接服务器时自动申请" />
+                                </DockPanel>
+                                <TextBlock Classes="hint" Text="服务器以它区分 Worker；保存在本机的原片（worker-local）只下发给添加它的 Worker。" />
+                                <DockPanel Classes="row"><TextBlock Text="临时文件目录" /><TextBox Text="{Binding Settings.TempDirectory}" PlaceholderText="{Binding DefaultTempDirectory}" /></DockPanel>
 
-                            <TextBlock Classes="section" Text="程序与目录" />
-                            <DockPanel Classes="row"><TextBlock Text="ffmpeg" /><TextBox Text="{Binding Settings.Ffmpeg}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="ffprobe" /><TextBox Text="{Binding Settings.Ffprobe}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="TrueCache 工具" /><TextBox Text="{Binding Settings.TrueCacheTool}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="工作目录" /><TextBox Text="{Binding Settings.WorkDirectory}" /></DockPanel>
-                            <TextBlock Classes="hint" Text="相对路径相对于配置文件所在的目录。" />
+                                <TextBlock Classes="section" Text="编码器" />
+                                <DockPanel Classes="row">
+                                    <TextBlock Text="编码器" />
+                                    <ComboBox ItemsSource="{Binding Encoders}" SelectedItem="{Binding Settings.Encoder}" HorizontalAlignment="Stretch" />
+                                </DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="硬件设备" /><TextBox Text="{Binding Settings.HardwareDevice}" PlaceholderText="vaapi 的渲染节点（如 /dev/dri/renderD128）或 nvenc 的 GPU 序号" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="线程数" /><TextBox Text="{Binding Settings.Threads}" PlaceholderText="0 为自动" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="同时编码" /><TextBox Text="{Binding Settings.Concurrency}" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="同时上传" /><TextBox Text="{Binding Settings.UploadConcurrency}" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="同时上传文件" /><TextBox Text="{Binding Settings.UploadFileConcurrency}" /></DockPanel>
 
-                            <TextBlock Classes="section" Text="编码" />
-                            <DockPanel Classes="row">
-                                <TextBlock Text="编码器" />
-                                <ComboBox ItemsSource="{Binding Encoders}" SelectedItem="{Binding Settings.Encoder}" HorizontalAlignment="Stretch" />
-                            </DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="硬件设备" /><TextBox Text="{Binding Settings.HardwareDevice}" PlaceholderText="vaapi 的渲染节点，例如 /dev/dri/renderD128" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="线程数" /><TextBox Text="{Binding Settings.Threads}" PlaceholderText="0 为自动" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="同时编码" /><TextBox Text="{Binding Settings.Concurrency}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="同时上传" /><TextBox Text="{Binding Settings.UploadConcurrency}" /></DockPanel>
+                                <TextBlock Classes="section" Text="自动任务" />
+                                <DockPanel Classes="row"><TextBlock Text="领取间隔（秒）" /><TextBox Text="{Binding Settings.PollSeconds}" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="请求超时（秒）" /><TextBox Text="{Binding Settings.ControlTimeoutSeconds}" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="输入缓存（GiB）" /><TextBox Text="{Binding Settings.InputCacheGiB}" /></DockPanel>
+                                <CheckBox Content="保留失败任务的工作目录" IsChecked="{Binding Settings.KeepFailedJobs}" Margin="170,0,0,8" />
+                            </StackPanel>
+                        </ScrollViewer>
 
-                            <TextBlock Classes="section" Text="其他" />
-                            <DockPanel Classes="row"><TextBlock Text="领取间隔（秒）" /><TextBox Text="{Binding Settings.PollSeconds}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="请求超时（秒）" /><TextBox Text="{Binding Settings.ControlTimeoutSeconds}" /></DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="输入缓存（GiB）" /><TextBox Text="{Binding Settings.InputCacheGiB}" /></DockPanel>
-                            <CheckBox Content="保留失败任务的工作目录" IsChecked="{Binding Settings.KeepFailedJobs}" Margin="170,0,0,8" />
-
-                            <TextBlock Classes="section" Text="HLS 根" />
-                            <DockPanel Classes="row">
-                                <TextBlock Text="连接" />
-                                <ComboBox ItemsSource="{Binding Connections}" SelectedItem="{Binding HlsConnection}" HorizontalAlignment="Stretch">
-                                    <ComboBox.ItemTemplate>
+                        <!-- Remote directories. -->
+                        <Grid x:Name="ConnectionsSection" IsVisible="False" ColumnDefinitions="220,16,*">
+                            <DockPanel Grid.Column="0">
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                                    <!-- The type is chosen once: another type is another directory. -->
+                                    <Button Content="新建 ▾">
+                                        <Button.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                                                <MenuItem Header="S3" Command="{Binding NewConnectionCommand}" CommandParameter="{x:Static cfg:ConnectionType.S3}" />
+                                                <MenuItem Header="SFTP" Command="{Binding NewConnectionCommand}" CommandParameter="{x:Static cfg:ConnectionType.Sftp}" />
+                                                <MenuItem Header="服务器目录" Command="{Binding NewConnectionCommand}" CommandParameter="{x:Static cfg:ConnectionType.Server}" />
+                                                <MenuItem Header="Worker目录" Command="{Binding NewConnectionCommand}" CommandParameter="{x:Static cfg:ConnectionType.Worker}" />
+                                            </MenuFlyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                    <Button Content="测试全部" Command="{Binding TestAllCommand}" />
+                                </StackPanel>
+                                <ListBox ItemsSource="{Binding Connections}" SelectedItem="{Binding SelectedConnection}" AutoScrollToSelectedItem="False">
+                                    <ListBox.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="克隆" Command="{Binding CloneConnectionCommand}" />
+                                            <MenuItem Header="删除" Command="{Binding RemoveConnectionCommand}" />
+                                        </ContextMenu>
+                                    </ListBox.ContextMenu>
+                                    <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="vm:ConnectionViewModel">
-                                            <TextBlock Text="{Binding Name}" />
-                                        </DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
-                            </DockPanel>
-                            <DockPanel Classes="row"><TextBlock Text="目录" /><TextBox Text="{Binding Settings.Hls.Path}" PlaceholderText="连接中的目录，例如 hls" /></DockPanel>
-                            <TextBlock Classes="hint" Text="编码成果上传到这里；它在服务器上的位置（S3 地址或服务器路径）上报给服务器。" />
-
-                            <TextBlock Classes="section" Text="连接" />
-                            <Grid ColumnDefinitions="180,16,*">
-                                <DockPanel Grid.Column="0">
-                                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
-                                        <Button Content="新建" Command="{Binding NewConnectionCommand}" />
-                                        <Button Content="删除" Command="{Binding RemoveConnectionCommand}" />
-                                    </StackPanel>
-                                    <ListBox ItemsSource="{Binding Connections}" SelectedItem="{Binding SelectedConnection}" MinHeight="160" AutoScrollToSelectedItem="False">
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate x:DataType="vm:ConnectionViewModel">
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" Classes="status" Text="{Binding StatusText}" ToolTip.Tip="{Binding StatusMessage}"
+                                                           Classes.ok="{Binding IsOk}" Classes.failed="{Binding IsFailed}" Classes.testing="{Binding IsTesting}" />
                                                 <StackPanel>
                                                     <TextBlock Text="{Binding Name}" />
-                                                    <TextBlock Text="{Binding Type}" Opacity="0.7" FontSize="12" />
+                                                    <TextBlock Text="{Binding TypeLabel}" Opacity="0.7" FontSize="12" />
                                                 </StackPanel>
-                                            </DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
-                                </DockPanel>
+                                            </DockPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
 
-                                <StackPanel Grid.Column="2" DataContext="{Binding SelectedConnection}" x:DataType="vm:ConnectionViewModel"
+                            <ScrollViewer Grid.Column="2">
+                                <StackPanel Margin="0,0,16,0" DataContext="{Binding SelectedConnection}" x:DataType="vm:ConnectionViewModel"
                                             IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).SelectedConnection, Converter={x:Static ObjectConverters.IsNotNull}}">
                                     <DockPanel Classes="row"><TextBlock Text="名称" /><TextBox Text="{Binding Name}" /></DockPanel>
                                     <DockPanel Classes="row">
                                         <TextBlock Text="类型" />
-                                        <ComboBox ItemsSource="{Binding $parent[Window].((vm:MainViewModel)DataContext).ConnectionTypes}"
-                                                  SelectedItem="{Binding Type}" HorizontalAlignment="Stretch" />
+                                        <TextBlock Text="{Binding TypeLabel}" VerticalAlignment="Center" />
                                     </DockPanel>
 
                                     <StackPanel IsVisible="{Binding IsS3}">
-                                        <DockPanel Classes="row"><TextBlock Text="Endpoint" /><TextBox Text="{Binding Model.Endpoint}" PlaceholderText="https://s3.example.com" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="Region" /><TextBox Text="{Binding Model.Region}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="Bucket" /><TextBox Text="{Binding Model.Bucket}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="Access Key" /><TextBox Text="{Binding Model.AccessKey}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="Secret Key" /><TextBox Text="{Binding Model.SecretKey}" PasswordChar="●" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Endpoint" /><TextBox Text="{Binding Endpoint}" PlaceholderText="https://s3.example.com" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Region" /><TextBox Text="{Binding Region}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Bucket" /><TextBox Text="{Binding Bucket}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="目录" /><TextBox Text="{Binding BucketPath}" PlaceholderText="桶中的目录，留空为整个桶" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Access Key" /><TextBox Text="{Binding AccessKey}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="Secret Key" /><TextBox Text="{Binding SecretKey}" PasswordChar="●" Classes="revealPasswordButton" /></DockPanel>
+                                        <DockPanel Classes="row">
+                                            <TextBlock Text="同时连接" />
+                                            <ComboBox ItemsSource="{Binding $parent[Window].((vm:MainViewModel)DataContext).PartConcurrencies}"
+                                                      SelectedItem="{Binding PartConcurrency}" HorizontalAlignment="Stretch" />
+                                        </DockPanel>
                                     </StackPanel>
 
                                     <StackPanel IsVisible="{Binding IsSftp}">
-                                        <DockPanel Classes="row"><TextBlock Text="主机" /><TextBox Text="{Binding Model.Host}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="端口" /><TextBox Text="{Binding Model.Port}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="主机密钥指纹" /><TextBox Text="{Binding Model.HostKey}" PlaceholderText="SHA256:…（ssh-keygen -lf 的输出）" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="用户" /><TextBox Text="{Binding Model.User}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="密码" /><TextBox Text="{Binding Model.Password}" PasswordChar="●" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="私钥文件" /><TextBox Text="{Binding Model.PrivateKeyPath}" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="私钥口令" /><TextBox Text="{Binding Model.PrivateKeyPassphrase}" PasswordChar="●" /></DockPanel>
-                                        <DockPanel Classes="row"><TextBlock Text="远端根目录" /><TextBox Text="{Binding Model.RemoteRoot}" PlaceholderText="/srv/media" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="主机" /><TextBox Text="{Binding Host}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="端口" /><TextBox Text="{Binding Port}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="主机密钥指纹" /><TextBox Text="{Binding HostKey}" PlaceholderText="SHA256:…（ssh-keygen -lf 的输出）" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="用户" /><TextBox Text="{Binding User}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="密码" /><TextBox Text="{Binding Password}" PasswordChar="●" Classes="revealPasswordButton" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="私钥文件" /><TextBox Text="{Binding PrivateKeyPath}" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="私钥口令" /><TextBox Text="{Binding PrivateKeyPassphrase}" PasswordChar="●" Classes="revealPasswordButton" /></DockPanel>
+                                        <DockPanel Classes="row"><TextBlock Text="远端根目录" /><TextBox Text="{Binding RemoteRoot}" PlaceholderText="/srv/media" /></DockPanel>
+                                        <TextBlock Classes="hint" Text="勾选「申告此目录」时，远端路径就是申告给服务器的路径（SFTP 连的是服务器时成立）。" />
                                     </StackPanel>
 
-                                    <StackPanel IsVisible="{Binding IsLocal}">
-                                        <DockPanel Classes="row"><TextBlock Text="本机目录" /><TextBox Text="{Binding Model.LocalRoot}" /></DockPanel>
+                                    <StackPanel IsVisible="{Binding IsServer}">
+                                        <DockPanel Classes="row"><TextBlock Text="服务器上的路径" /><TextBox Text="{Binding ServerPath}" PlaceholderText="/srv/media" /></DockPanel>
+                                        <TextBlock Classes="hint" Text="只有服务器能访问这个目录：在方案中只能勾选「申告此目录」，文件经其他行到达，Worker 无法测试。" />
                                     </StackPanel>
 
-                                    <StackPanel IsVisible="{Binding !IsS3}">
-                                        <DockPanel Classes="row"><TextBlock Text="在服务器上的路径" /><TextBox Text="{Binding Model.ServerRoot}" /></DockPanel>
-                                        <TextBlock Classes="hint" Text="这个根目录在 Jellyfin 服务器上的路径：媒体库目录由此映射，HLS 根放在这里时也由此得出上报的位置。" />
+                                    <StackPanel IsVisible="{Binding IsWorker}">
+                                        <DockPanel Classes="row"><TextBlock Text="本机目录" /><TextBox Text="{Binding LocalRoot}" /></DockPanel>
+                                    </StackPanel>
+
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="170,0,0,0">
+                                        <Button Content="测试" Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).TestConnectionCommand}" />
+                                        <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </StackPanel>
-                            </Grid>
-                        </StackPanel>
-                    </ScrollViewer>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <!-- Schemes. -->
+                        <Grid x:Name="SchemesSection" IsVisible="False" ColumnDefinitions="180,16,*">
+                            <DockPanel Grid.Column="0">
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                                    <Button Content="新建" Command="{Binding NewSchemeCommand}" />
+                                </StackPanel>
+                                <ListBox ItemsSource="{Binding Schemes}" SelectedItem="{Binding SelectedScheme}" AutoScrollToSelectedItem="False">
+                                    <ListBox.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="克隆" Command="{Binding CloneSchemeCommand}" />
+                                            <MenuItem Header="删除" Command="{Binding RemoveSchemeCommand}" />
+                                        </ContextMenu>
+                                    </ListBox.ContextMenu>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:SchemeViewModel">
+                                            <TextBlock Text="{Binding Name}" />
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
+
+                            <ScrollViewer Grid.Column="2">
+                                <StackPanel Margin="0,0,16,0" DataContext="{Binding SelectedScheme}" x:DataType="vm:SchemeViewModel"
+                                            IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).SelectedScheme, Converter={x:Static ObjectConverters.IsNotNull}}">
+                                    <DockPanel Classes="row">
+                                        <TextBlock Text="方案名" />
+                                        <TextBox Text="{Binding Name}" MaxLength="64" />
+                                    </DockPanel>
+
+                                    <DockPanel>
+                                        <Button DockPanel.Dock="Right" Content="添加" Command="{Binding AddHlsCommand}" VerticalAlignment="Center" Margin="0,12,0,8" />
+                                        <TextBlock Classes="section" Text="HLS 保存路径" />
+                                    </DockPanel>
+                                    <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding Error, Converter={x:Static ObjectConverters.IsNotNull}}" Margin="0,0,0,8" />
+                                    <ItemsControl ItemsSource="{Binding Hls}" ItemTemplate="{StaticResource EntryTemplate}" />
+                                    <TextBlock Classes="hint" Margin="0,8,0,0"
+                                               Text="最多勾选一个申告目录。都不勾选时，HLS 另存到本机临时文件目录下的 hls 并以 worker-local 申告，服务器无法播放。" />
+
+                                    <DockPanel>
+                                        <Button DockPanel.Dock="Right" Content="添加" Command="{Binding AddSourceCommand}" VerticalAlignment="Center" Margin="0,12,0,8" />
+                                        <TextBlock Classes="section" Text="源文件保存路径" />
+                                    </DockPanel>
+                                    <ItemsControl ItemsSource="{Binding Sources}" ItemTemplate="{StaticResource EntryTemplate}" />
+                                    <TextBlock Classes="hint" Margin="0,8,0,0"
+                                               Text="最多勾选一个申告目录。都不勾选时，.strm 指向本机的原文件（worker-local），任务只下发给本机。需要子目录时，新建一个远程目录。" />
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <!-- Libraries. -->
+                        <Grid x:Name="LibrariesSection" IsVisible="False" ColumnDefinitions="220,16,*">
+                            <DockPanel Grid.Column="0">
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                                    <Button Content="刷新" Command="{Binding RefreshLibrariesCommand}" />
+                                </StackPanel>
+                                <ListBox ItemsSource="{Binding Libraries}" SelectedItem="{Binding SelectedLibrary}" AutoScrollToSelectedItem="False">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:LibraryViewModel">
+                                            <Border Classes.missing="{Binding IsMissing}" Padding="4,2" ToolTip.Tip="{Binding LocationsText}">
+                                                <TextBlock Text="{Binding Name}" />
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
+
+                            <ScrollViewer Grid.Column="2">
+                                <StackPanel Margin="0,0,16,0" DataContext="{Binding SelectedLibrary}" x:DataType="vm:LibraryViewModel"
+                                            IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).SelectedLibrary, Converter={x:Static ObjectConverters.IsNotNull}}">
+                                    <TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" />
+                                    <TextBlock Classes="hint" Margin="0,4,0,8" Text="{Binding LocationsText}" />
+                                    <TextBlock Classes="error" Text="服务器上已没有这个媒体库。" IsVisible="{Binding IsMissing}" Margin="0,0,0,8" />
+                                    <DockPanel Classes="row">
+                                        <TextBlock Text="默认方案" />
+                                        <ComboBox ItemsSource="{Binding SchemeOptions}" SelectedItem="{Binding Scheme}" HorizontalAlignment="Stretch" />
+                                    </DockPanel>
+                                    <DockPanel Classes="row" IsVisible="{Binding HasSeveralLocations}">
+                                        <TextBlock Text="写入目录" />
+                                        <ComboBox ItemsSource="{Binding Locations}" SelectedItem="{Binding Location}" HorizontalAlignment="Stretch" />
+                                    </DockPanel>
+                                    <DockPanel Classes="row"><TextBlock Text="前缀名" /><TextBox Text="{Binding Prefix}" PlaceholderText="例如 movies，留空为无" /></DockPanel>
+                                    <CheckBox Content="源文件上传时使用前缀" IsChecked="{Binding PrefixSources}" Margin="170,0,0,4" />
+                                    <CheckBox Content="HLS 上传时使用前缀" IsChecked="{Binding PrefixHls}" Margin="170,0,0,8" />
+                                    <DockPanel Classes="row">
+                                        <TextBlock Text="预编码" />
+                                        <ItemsControl ItemsSource="{Binding PreEncodeQualities}" IsEnabled="{Binding CanPreEncode}" VerticalAlignment="Center">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:QualityOptionViewModel">
+                                                    <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" Margin="0,0,16,0" />
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </DockPanel>
+                                    <TextBlock Classes="hint" Text="添加媒体时默认立即编码勾选的档位。" IsVisible="{Binding CanPreEncode}" />
+                                    <TextBlock Classes="hint" Text="服务器没有预编码这个媒体库，或档位已在「预编码配置」中全部关闭。" IsVisible="{Binding !CanPreEncode}" />
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <!-- Pre-encoded libraries. -->
+                        <Grid x:Name="PreEncodesSection" IsVisible="False" ColumnDefinitions="260,16,*">
+                            <DockPanel Grid.Column="0">
+                                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                                    <Button Content="刷新" Command="{Binding RefreshPreEncodesCommand}" />
+                                </StackPanel>
+                                <ListBox ItemsSource="{Binding PreEncodes}" SelectedItem="{Binding SelectedPreEncode}" AutoScrollToSelectedItem="False">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:PreEncodeViewModel">
+                                            <Border Classes.missing="{Binding IsMissing}" Padding="4,2">
+                                                <DockPanel>
+                                                    <CheckBox DockPanel.Dock="Right" Content="启用" IsChecked="{Binding Enabled}" Margin="8,0,0,0" />
+                                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
+                                                </DockPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
+
+                            <StackPanel Grid.Column="2" DataContext="{Binding SelectedPreEncode}" x:DataType="vm:PreEncodeViewModel"
+                                        IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).SelectedPreEncode, Converter={x:Static ObjectConverters.IsNotNull}}">
+                                <DockPanel Classes="row"><TextBlock Text="名称" /><TextBlock Text="{Binding Name}" /></DockPanel>
+                                <DockPanel Classes="row"><TextBlock Text="Id" /><SelectableTextBlock Text="{Binding IdText}" /></DockPanel>
+                                <DockPanel Classes="row">
+                                    <TextBlock Text="档位" />
+                                    <ItemsControl ItemsSource="{Binding Qualities}" VerticalAlignment="Center">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="vm:QualityOptionViewModel">
+                                                <CheckBox Content="{Binding Label}" IsChecked="{Binding IsChecked}" Margin="0,0,16,0" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </DockPanel>
+                                <TextBlock Classes="hint" Text="关闭的档位本机不编码：添加媒体时不可选，领取任务时留给其他 Worker。" />
+                                <TextBlock Classes="error" Text="服务器已不再预编码这个媒体库。" IsVisible="{Binding IsMissing}" />
+                                <TextBlock Classes="hint" Margin="0,8,0,0" Text="开始领取任务时只领取启用的媒体库的任务。" />
+                            </StackPanel>
+                        </Grid>
+                    </Panel>
+                </DockPanel>
+            </Panel>
+
+            <Panel x:Name="UploadsPage" IsVisible="False">
+                <DockPanel Margin="8" DataContext="{Binding Uploads}" x:DataType="vm:UploadLogViewModel">
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                        <Button Content="刷新" Command="{Binding RefreshCommand}" />
+                        <TextBlock Text="{Binding Status}" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="24,150,80,150,200,*,110,90" Margin="12,0,12,4" Opacity="0.7">
+                        <TextBlock Grid.Column="1" Text="时间" />
+                        <TextBlock Grid.Column="2" Text="类型" />
+                        <TextBlock Grid.Column="3" Text="状态" />
+                        <TextBlock Grid.Column="4" Text="文件" />
+                        <TextBlock Grid.Column="5" Text="目标" />
+                        <TextBlock Grid.Column="6" Text="数量" />
+                        <TextBlock Grid.Column="7" Text="大小" TextAlignment="Right" />
+                    </Grid>
+                    <ListBox ItemsSource="{Binding Groups}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:UploadGroupRow">
+                                <StackPanel>
+                                    <Grid ColumnDefinitions="24,150,80,150,200,*,110,90" ToolTip.Tip="{Binding Error}">
+                                        <ToggleButton Grid.Column="0" IsChecked="{Binding IsExpanded}" IsVisible="{Binding CanExpand}" Padding="0"
+                                                      Width="20" Height="20" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" VerticalAlignment="Center"
+                                                      ToolTip.Tip="显示每个文件">
+                                            <Panel>
+                                                <TextBlock Text="▸" IsVisible="{Binding !IsExpanded}" />
+                                                <TextBlock Text="▾" IsVisible="{Binding IsExpanded}" />
+                                            </Panel>
+                                        </ToggleButton>
+                                        <TextBlock Grid.Column="1" Text="{Binding Time}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Text="{Binding Kind}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{Binding Status}" Classes="task" Classes.ok="{Binding Succeeded}" Classes.failed="{Binding Failed}"
+                                                   HorizontalAlignment="Left" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="4" Text="{Binding FileName}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="5" Text="{Binding Target}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="6" Text="{Binding Count}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="7" Text="{Binding Size}" TextAlignment="Right" VerticalAlignment="Center" />
+                                    </Grid>
+                                    <StackPanel IsVisible="{Binding IsExpanded}" Margin="24,4,0,4">
+                                        <TextBlock Classes="error" Text="{Binding LoadError}" IsVisible="{Binding LoadError, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                                        <ItemsControl ItemsSource="{Binding Rows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:UploadRecordRow">
+                                                    <Grid ColumnDefinitions="150,90,60,240,*,90" ToolTip.Tip="{Binding Error}" Opacity="0.85">
+                                                        <TextBlock Grid.Column="0" Text="{Binding Time}" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding Kind}" />
+                                                        <TextBlock Grid.Column="2" Text="{Binding Result}" Classes="task" Classes.ok="{Binding Succeeded}" Classes.failed="{Binding Failed}" HorizontalAlignment="Left" />
+                                                        <TextBlock Grid.Column="3" Text="{Binding FileName}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" />
+                                                        <TextBlock Grid.Column="4" Text="{Binding Destination}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" />
+                                                        <TextBlock Grid.Column="5" Text="{Binding Size}" TextAlignment="Right" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
                 </DockPanel>
             </Panel>
           </Panel>
         </DockPanel>
 
         <GridSplitter Grid.Row="1" Height="6" ResizeDirection="Rows" Background="Transparent" />
-        <ListBox Grid.Row="2" x:Name="LogList" ItemsSource="{Binding Log}" Margin="8,0,8,0" FontFamily="Cascadia Mono,Consolas,monospace" FontSize="12">
+        <ListBox Grid.Row="2" x:Name="LogList" ItemsSource="{Binding Log}" SelectionMode="Multiple" Margin="8,0,8,0" FontFamily="Cascadia Mono,Consolas,monospace" FontSize="12">
             <ListBox.ItemTemplate>
                 <DataTemplate x:DataType="x:String">
-                    <SelectableTextBlock Text="{Binding}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding}" TextWrapping="Wrap" />
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>

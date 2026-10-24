@@ -18,8 +18,9 @@ public interface IStorageSession : IDisposable
     /// <param name="path">The path in the connection, with forward slashes.</param>
     /// <param name="localFile">The file to write.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="sent">Told the bytes sent so far; may go back when a part is sent again.</param>
     /// <returns>A task.</returns>
-    Task PutAsync(string path, string localFile, CancellationToken cancellationToken);
+    Task PutAsync(string path, string localFile, CancellationToken cancellationToken, Action<long>? sent = null);
 
     /// <summary>
     /// Gets whether a file exists.
@@ -75,7 +76,7 @@ public abstract class StorageConnection : IDisposable
     public ConnectionSettings Settings { get; }
 
     /// <summary>
-    /// Creates the connection the settings describe.
+    /// Creates the connection the settings describe; a directory of the server has none.
     /// </summary>
     /// <param name="settings">The settings, validated.</param>
     /// <param name="logger">The logger.</param>
@@ -85,9 +86,10 @@ public abstract class StorageConnection : IDisposable
         ArgumentNullException.ThrowIfNull(settings);
         return settings.Type switch
         {
-            ConnectionType.S3 => new S3Connection(settings),
+            ConnectionType.S3 => new S3Connection(settings, logger),
             ConnectionType.Sftp => new SftpConnection(settings, logger),
-            ConnectionType.Local => new LocalConnection(settings),
+            ConnectionType.Worker => new LocalConnection(settings),
+            ConnectionType.Server => throw new NotSupportedException("服务器目录由服务器访问，Worker 无法连接。"),
             _ => throw new ArgumentException("不支持的连接类型：" + settings.Type)
         };
     }
@@ -114,6 +116,18 @@ public abstract class StorageConnection : IDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The session.</returns>
     public abstract Task<IStorageSession> OpenAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Checks that the storage is reached and its credentials are taken; nothing is written. A session is opened, which checks the
+    /// root of a directory, and a file is looked up in it.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    public virtual async Task CheckAsync(CancellationToken cancellationToken)
+    {
+        using var session = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await session.ExistsAsync(HlsTarget.MarkerName, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public void Dispose()

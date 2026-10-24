@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Jellyfin.Hls.Worker.Configuration;
 
 /// <summary>How a connection reaches its storage.</summary>
@@ -9,8 +11,11 @@ public enum ConnectionType
     /// <summary>A directory of an SSH server.</summary>
     Sftp = 1,
 
+    /// <summary>A directory of the Jellyfin server, which only the server reaches: it is declared, never written by the worker.</summary>
+    Server = 2,
+
     /// <summary>A directory of this machine, such as a mounted share.</summary>
-    Local = 2
+    Worker = 3
 }
 
 /// <summary>
@@ -18,7 +23,13 @@ public enum ConnectionType
 /// </summary>
 public sealed class ConnectionSettings
 {
-    /// <summary>Gets or sets the name the connection is referred to by.</summary>
+    /// <summary>The numbers of parts that can be uploaded at the same time.</summary>
+    public static readonly IReadOnlyList<int> PartConcurrencies = [1, 2, 5, 10, 20, 50, 100];
+
+    /// <summary>Gets or sets the id the schemes refer to the connection by.</summary>
+    public Guid Id { get; set; }
+
+    /// <summary>Gets or sets the name the connection is shown by.</summary>
     public string Name { get; set; } = string.Empty;
 
     /// <summary>Gets or sets how the connection reaches its storage.</summary>
@@ -33,11 +44,17 @@ public sealed class ConnectionSettings
     /// <summary>Gets or sets the bucket, by the name the server knows it.</summary>
     public string Bucket { get; set; } = string.Empty;
 
+    /// <summary>Gets or sets the directory of the bucket that the connection is, with forward slashes; empty for the whole bucket.</summary>
+    public string BucketPath { get; set; } = string.Empty;
+
     /// <summary>Gets or sets the access key.</summary>
     public string AccessKey { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the secret key.</summary>
     public string SecretKey { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets how many parts of a file put in parts are uploaded at the same time, one of <see cref="PartConcurrencies"/>; with 1 they go in order.</summary>
+    public int PartConcurrency { get; set; } = 1;
 
     /// <summary>Gets or sets the SSH host.</summary>
     public string Host { get; set; } = string.Empty;
@@ -68,11 +85,8 @@ public sealed class ConnectionSettings
     /// <summary>Gets or sets the directory of this machine that the connection is.</summary>
     public string LocalRoot { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Gets or sets the absolute path at which the Jellyfin server sees <see cref="RemoteRoot"/> or <see cref="LocalRoot"/>;
-    /// empty for a local connection on the machine of the server.
-    /// </summary>
-    public string ServerRoot { get; set; } = string.Empty;
+    /// <summary>Gets or sets the absolute directory of the Jellyfin server that a connection of the server is.</summary>
+    public string ServerPath { get; set; } = string.Empty;
 
     /// <summary>
     /// Checks the fields the type uses.
@@ -80,6 +94,11 @@ public sealed class ConnectionSettings
     /// <exception cref="ArgumentException">The connection is not valid.</exception>
     public void Validate()
     {
+        if (Id.Equals(Guid.Empty))
+        {
+            throw new ArgumentException("连接 " + Name + " 没有 Id。");
+        }
+
         if (string.IsNullOrWhiteSpace(Name) || Name.Length > 64)
         {
             throw new ArgumentException("连接的 Name 长度应为 1–64。");
@@ -99,6 +118,17 @@ public sealed class ConnectionSettings
                     throw new ArgumentException(name + "：需要有效的 Bucket、AccessKey 和 SecretKey。");
                 }
 
+                var bucketPath = BucketPath.Trim('/');
+                if (bucketPath.Length > 0 && !StoragePath.IsValidRelative(bucketPath))
+                {
+                    throw new ArgumentException(name + "：BucketPath 应为桶中的相对路径，使用 /。");
+                }
+
+                if (!PartConcurrencies.Contains(PartConcurrency))
+                {
+                    throw new ArgumentException(name + "：PartConcurrency 应为 " + string.Join("、", PartConcurrencies) + " 之一。");
+                }
+
                 break;
             case ConnectionType.Sftp:
                 if (string.IsNullOrWhiteSpace(Host) || Port is < 1 or > 65535 || string.IsNullOrWhiteSpace(User))
@@ -116,117 +146,101 @@ public sealed class ConnectionSettings
                     throw new ArgumentException(name + "：RemoteRoot 应为以 / 开头的绝对路径。");
                 }
 
-                RequireServerRoot(name, required: true);
                 break;
-            case ConnectionType.Local:
+            case ConnectionType.Server:
+                // The server may run on another system than the worker, so the path is taken in either style.
+                if (!StoragePath.IsAbsoluteServerPath(ServerPath))
+                {
+                    throw new ArgumentException(name + "：服务器上的路径应为绝对路径，例如 /srv/media 或 D:\\Media。");
+                }
+
+                break;
+            case ConnectionType.Worker:
                 if (string.IsNullOrWhiteSpace(LocalRoot) || !Path.IsPathFullyQualified(LocalRoot))
                 {
                     throw new ArgumentException(name + "：LocalRoot 应为本机绝对路径。");
                 }
 
-                RequireServerRoot(name, required: false);
                 break;
             default:
-                throw new ArgumentException(name + "：Type 应为 S3、Sftp 或 Local。");
-        }
-    }
-
-    // The server may run on another system than the worker, so its path is taken in either style.
-    private void RequireServerRoot(string name, bool required)
-    {
-        if (ServerRoot.Length == 0 && !required)
-        {
-            return;
-        }
-
-        if (!StoragePath.IsAbsoluteServerPath(ServerRoot))
-        {
-            throw new ArgumentException(name + "：ServerRoot 应为 Jellyfin 服务器上的绝对路径，例如 /mnt/hls 或 D:\\HLS。");
-        }
-    }
-}
-
-/// <summary>
-/// Where the renditions are written: a directory of a connection.
-/// </summary>
-public sealed class HlsTargetSettings
-{
-    /// <summary>Gets or sets the name of the connection.</summary>
-    public string Connection { get; set; } = string.Empty;
-
-    /// <summary>Gets or sets the directory in the connection, with forward slashes; empty for the connection itself.</summary>
-    public string Path { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Checks the directory.
-    /// </summary>
-    /// <param name="connection">The connection it names.</param>
-    /// <exception cref="ArgumentException">The directory is not valid.</exception>
-    public void Validate(ConnectionSettings connection)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-        var path = Path.Trim('/');
-        if (path.Length > 0 && !StoragePath.IsValidRelative(path))
-        {
-            throw new ArgumentException("Hls.Path 应为相对路径，使用 /，各段不能为空、不能以 . 或空格结尾。");
+                throw new ArgumentException(name + "：Type 应为 S3、Sftp、Server 或 Worker。");
         }
     }
 
     /// <summary>
-    /// Gets the root of the HLS store as the server names it: <c>s3://bucket/path</c> or a path of the server.
+    /// Gets the key in the bucket of a path of an S3 connection: the path below <see cref="BucketPath"/>.
     /// </summary>
-    /// <param name="connection">The connection it names.</param>
-    /// <returns>The root.</returns>
-    public string GetBase(ConnectionSettings connection)
+    /// <param name="path">The path in the connection, with forward slashes; empty for the connection itself.</param>
+    /// <returns>The key.</returns>
+    public string GetS3Key(string path)
     {
-        ArgumentNullException.ThrowIfNull(connection);
-        var path = Path.Trim('/');
-        return connection.Type switch
+        ArgumentNullException.ThrowIfNull(path);
+        var root = BucketPath.Trim('/');
+        path = path.Trim('/');
+        return root.Length == 0 ? path : path.Length == 0 ? root : root + "/" + path;
+    }
+
+    /// <summary>
+    /// Gets a path of an S3 connection as the server names it: <c>s3://bucket/key</c>.
+    /// </summary>
+    /// <param name="path">The path in the connection, with forward slashes; empty for the connection itself.</param>
+    /// <returns>The address.</returns>
+    public string GetS3Address(string path)
+    {
+        var key = GetS3Key(path);
+        return "s3://" + Bucket + (key.Length == 0 ? string.Empty : "/" + key);
+    }
+
+    /// <summary>
+    /// Gets a path of a connection that is not S3 as a path: of the SSH server for SFTP, which is declared as a path of the
+    /// Jellyfin server as it is (SFTP reaches the server), of the server, or of this machine.
+    /// </summary>
+    /// <param name="path">The path in the connection, with forward slashes; empty for the connection itself.</param>
+    /// <returns>The path.</returns>
+    /// <exception cref="InvalidOperationException">The connection is S3.</exception>
+    public string GetServerPath(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        path = path.Trim('/');
+        return Type switch
         {
-            ConnectionType.S3 => "s3://" + connection.Bucket + (path.Length == 0 ? string.Empty : "/" + path),
-            ConnectionType.Sftp => StoragePath.JoinServer(connection.ServerRoot, path),
-            _ => StoragePath.JoinServer(connection.ServerRoot.Length == 0 ? connection.LocalRoot : connection.ServerRoot, path)
+            ConnectionType.Sftp => StoragePath.JoinServer(RemoteRoot, path),
+            ConnectionType.Server => StoragePath.JoinServer(ServerPath, path),
+            ConnectionType.Worker => StoragePath.JoinServer(LocalRoot, path),
+            _ => throw new InvalidOperationException("S3 连接没有路径，应使用 s3:// 地址。")
         };
     }
-}
-
-/// <summary>
-/// Where the media added to a library goes: an S3 connection, the objects referred to by .strm files in the folder of the
-/// library, or the folder of the library itself.
-/// </summary>
-public sealed class LibrarySettings
-{
-    /// <summary>Gets or sets the library.</summary>
-    public Guid Id { get; set; }
-
-    /// <summary>Gets or sets the S3 connection of the media; empty puts the media into the folder of the library.</summary>
-    public string Connection { get; set; } = string.Empty;
-
-    /// <summary>Gets or sets the prefix of the objects in the bucket, with forward slashes; may be empty.</summary>
-    public string Prefix { get; set; } = string.Empty;
 
     /// <summary>
-    /// Checks the default.
+    /// Makes a copy of the connection whose root is a directory below its own.
     /// </summary>
-    /// <param name="settings">The settings it is part of.</param>
-    /// <exception cref="ArgumentException">The default is not valid.</exception>
-    public void Validate(WorkerSettings settings)
+    /// <param name="path">The directory in the connection, with forward slashes.</param>
+    /// <param name="id">The id of the copy.</param>
+    /// <param name="name">The name of the copy.</param>
+    /// <returns>The copy.</returns>
+    public ConnectionSettings Below(string path, Guid id, string name)
     {
-        ArgumentNullException.ThrowIfNull(settings);
-        if (Id.Equals(Guid.Empty))
+        ArgumentNullException.ThrowIfNull(path);
+        var copy = JsonSerializer.Deserialize<ConnectionSettings>(JsonSerializer.Serialize(this, WorkerSettings.Json), WorkerSettings.Json)!;
+        copy.Id = id;
+        copy.Name = name;
+        path = path.Trim('/');
+        switch (Type)
         {
-            throw new ArgumentException("Libraries 中每一项都需要媒体库的 Id。");
+            case ConnectionType.S3:
+                copy.BucketPath = GetS3Key(path);
+                break;
+            case ConnectionType.Sftp:
+                copy.RemoteRoot = StoragePath.JoinServer(RemoteRoot, path);
+                break;
+            case ConnectionType.Server:
+                copy.ServerPath = StoragePath.JoinServer(ServerPath, path);
+                break;
+            default:
+                copy.LocalRoot = StoragePath.JoinServer(LocalRoot, path);
+                break;
         }
 
-        if (Connection.Length > 0 && settings.GetConnection(Connection).Type != ConnectionType.S3)
-        {
-            throw new ArgumentException("媒体库 " + Id + " 的 Connection 应为 S3 连接；直接放进媒体库目录时留空。");
-        }
-
-        var prefix = Prefix.Trim('/');
-        if (prefix.Length > 0 && !StoragePath.IsValidRelative(prefix))
-        {
-            throw new ArgumentException("媒体库 " + Id + " 的 Prefix 应为相对路径，使用 /。");
-        }
+        return copy;
     }
 }

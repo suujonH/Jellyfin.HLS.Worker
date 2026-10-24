@@ -24,7 +24,7 @@ internal sealed class LocalConnection : StorageConnection
 
     private sealed class Session(string root) : IStorageSession
     {
-        public async Task PutAsync(string path, string localFile, CancellationToken cancellationToken)
+        public async Task PutAsync(string path, string localFile, CancellationToken cancellationToken, Action<long>? sent = null)
         {
             var destination = Resolve(path);
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)!);
@@ -37,7 +37,12 @@ internal sealed class LocalConnection : StorageConnection
                     var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, FileOptions.Asynchronous);
                     await using (to.ConfigureAwait(false))
                     {
-                        await from.CopyToAsync(to, cancellationToken).ConfigureAwait(false);
+                        Stream counted = sent is null ? from : new ProgressStream(from, sent);
+                        await using (counted.ConfigureAwait(false))
+                        {
+                            await counted.CopyToAsync(to, cancellationToken).ConfigureAwait(false);
+                        }
+
                         await to.FlushAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
