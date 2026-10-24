@@ -179,7 +179,7 @@ internal sealed partial class MainViewModel
     private static bool IsRetryable(AddTaskViewModel task) => task.CanRetry && task.State is AddTaskState.Failed or AddTaskState.Cancelled;
 
     // The first one waiting, each in turn, so that those put in the list meanwhile are taken too. One that uses a directory deleted
-    // since it was put in the list is cancelled without being run.
+    // or moved since it was put in the list is cancelled without being run.
     private async Task RunAddsAsync(CancellationToken cancellationToken)
     {
         try
@@ -187,10 +187,13 @@ internal sealed partial class MainViewModel
             while (!cancellationToken.IsCancellationRequested
                 && AddTasks.FirstOrDefault(t => t.State == AddTaskState.Waiting) is { } task)
             {
-                if (task.FindDeleted() is { } deleted)
+                var deleted = task.FindDeleted();
+                var moved = deleted is null ? task.FindMoved() : null;
+                if (deleted is not null || moved is not null)
                 {
-                    _logger.LogWarning("不执行添加 {Title}：目录 {Label} 已删除", task.Title, deleted);
-                    task.Refuse("目录 " + deleted + " 已删除，不能执行，请重新添加");
+                    var reason = deleted is not null ? "目录 " + deleted + " 已删除" : "目录 " + moved + " 的位置已更改";
+                    _logger.LogWarning("不执行添加 {Title}：{Reason}", task.Title, reason);
+                    task.Refuse(reason + "，不能执行，请重新添加");
                     if (task.ReleaseEngineOnce())
                     {
                         ReleaseEngine();

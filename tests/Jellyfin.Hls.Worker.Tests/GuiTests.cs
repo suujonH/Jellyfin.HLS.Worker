@@ -533,6 +533,24 @@ public sealed class GuiTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAdditionOfADirectoryMovedSinceItWasPutInTheList_IsCancelledForGood()
+    {
+        var gate = new TaskCompletionSource();
+        gate.SetResult();
+        using var main = OpenToAdd(gate, new TaskCompletionSource());
+        var before = new ConnectionSettings { Id = _backup, Name = "backup", Type = ConnectionType.Worker, LocalRoot = Path.Combine(_directory, "old") };
+        var request = new AddRequest(_library, null, [Missing("a")], new SourcePlan([new PlanTarget(before, string.Empty, "backup:")], null));
+        main.AddTasks.Add(new AddTaskViewModel(main.AcquireEngine()!, request, "Old"));
+
+        await main.StartAddsCommand.ExecuteAsync(null);
+
+        var refused = Assert.Single(main.AddTasks);
+        Assert.False(refused.CanRetry);
+        Assert.Equal("已取消：目录 backup: 的位置已更改，不能执行，请重新添加", refused.StatusText);
+        Assert.False(main.IsEngineInUse);
+    }
+
+    [Fact]
     public async Task AFolderPutInTheList_ShowsItsFiles_BeforeItRuns()
     {
         using var main = OpenToAdd(new TaskCompletionSource(), new TaskCompletionSource());

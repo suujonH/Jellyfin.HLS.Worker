@@ -154,14 +154,30 @@ internal sealed partial class AddTaskViewModel : ObservableObject
     internal string? FindDeleted()
     {
         var ids = Engine.Settings.Connections.Select(c => c.Id).ToHashSet();
-        bool Deleted(ConnectionSettings? connection) => connection is not null && !ids.Contains(connection.Id);
-        if (Request.Source.Uploads.Concat(Request.Hls?.Uploads ?? []).FirstOrDefault(t => Deleted(t.Connection)) is { } target)
+        return Find(c => !ids.Contains(c.Id));
+    }
+
+    /// <summary>
+    /// Finds a directory the addition uses whose place the settings of its engine changed since it was put in the list, such as its
+    /// root or bucket: what it declares was planned for the old place.
+    /// </summary>
+    /// <returns>Its label, or <c>null</c> when every one is where it was.</returns>
+    internal string? FindMoved()
+    {
+        var connections = Engine.Settings.Connections.ToDictionary(c => c.Id);
+        return Find(c => connections.TryGetValue(c.Id, out var current) && !current.IsSamePlace(c));
+    }
+
+    private string? Find(Func<ConnectionSettings, bool> match)
+    {
+        bool Matches(ConnectionSettings? connection) => connection is not null && match(connection);
+        if (Request.Source.Uploads.Concat(Request.Hls?.Uploads ?? []).FirstOrDefault(t => Matches(t.Connection)) is { } target)
         {
             return target.Label;
         }
 
-        return Deleted(Request.Source.Declaration?.Connection) ? Request.Source.Declaration!.Connection!.Name
-            : Deleted(Request.Hls?.DeclaredS3) ? Request.Hls!.DeclaredS3!.Name
+        return Matches(Request.Source.Declaration?.Connection) ? Request.Source.Declaration!.Connection!.Name
+            : Matches(Request.Hls?.DeclaredS3) ? Request.Hls!.DeclaredS3!.Name
             : null;
     }
 

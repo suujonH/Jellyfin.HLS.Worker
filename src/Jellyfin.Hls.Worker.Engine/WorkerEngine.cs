@@ -127,10 +127,14 @@ public sealed class WorkerEngine : IDisposable
             }
 
             var destinations = new Dictionary<Guid, HlsDestination>();
+            var served = await GetServedQualitiesAsync(cancellationToken).ConfigureAwait(false);
             foreach (var (libraryId, plan) in libraries)
             {
-                // Its source files would be read for nothing.
-                if (_settings.PreEncodes.Find(p => p.LibraryId.Equals(libraryId)) is { Qualities.Count: > 0, EnabledQualities.Count: 0 } preEncode)
+                // Its source files would be read for nothing. The qualities are those the server has now, which may be more than the
+                // settings last saw: a quality the server added is not turned off.
+                if (_settings.PreEncodes.Find(p => p.LibraryId.Equals(libraryId)) is { } preEncode
+                    && (served.GetValueOrDefault(libraryId) ?? preEncode.Qualities) is { Count: > 0 } qualities
+                    && qualities.All(preEncode.DisabledQualities.Contains))
                 {
                     _logger.LogWarning("媒体库 {Library} 的档位已全部关闭，不领取它的任务", preEncode.Name);
                     continue;
@@ -450,6 +454,20 @@ public sealed class WorkerEngine : IDisposable
             }
 
             return _workspace;
+        }
+    }
+
+    // The qualities of each library the server pre-encodes; none when it cannot tell, the settings being used instead.
+    private async Task<IReadOnlyDictionary<Guid, IReadOnlyList<int>>> GetServedQualitiesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await _server.GetLibrariesAsync(cancellationToken).ConfigureAwait(false)).ToDictionary(l => l.Id, l => l.Qualities);
+        }
+        catch (Exception ex) when (ex is ServerException or HttpRequestException or IOException)
+        {
+            _logger.LogWarning("未能取得服务器的档位，使用设置中记下的档位：{Message}", ex.Message);
+            return new Dictionary<Guid, IReadOnlyList<int>>();
         }
     }
 

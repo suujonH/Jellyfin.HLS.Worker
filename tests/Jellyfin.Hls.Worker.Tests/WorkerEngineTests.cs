@@ -209,6 +209,27 @@ public sealed class WorkerEngineTests : IDisposable
         Assert.Equal([720], filter.Excluded);
     }
 
+    [Fact]
+    public async Task Run_ALibraryWithEveryQualityTurnedOff_IsClaimedForAQualityTheServerAdded()
+    {
+        var off = Guid.NewGuid();
+        var server = Serve((path, _) => Task.FromResult(path switch
+        {
+            _ when path.EndsWith("/Poll", StringComparison.Ordinal) => FakeServer.Status(HttpStatusCode.NoContent),
+            _ when path.EndsWith("/Libraries", StringComparison.Ordinal) => FakeServer.Json(new[] { new WorkerLibrary(off, "Off", [720, 480]) }),
+            _ => null
+        }));
+        var settings = Settings();
+        settings.PreEncodes.Add(new PreEncodeSettings { LibraryId = off, Name = "Off", Qualities = [480], DisabledQualities = [480] });
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+
+        Assert.Equal(WorkerEngine.Success, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [off] = Hls(settings, "c") }, true, CancellationToken.None));
+
+        var poll = JsonSerializer.Deserialize<WorkerRequest>(Body(server, "/Poll"), ServerClient.Json)!;
+        Assert.Equal([off], poll.Libraries!);
+        Assert.Equal([480], Assert.Single(poll.ExcludedQualities!).Excluded);
+    }
+
     // No HLS directory declared: the renditions are kept in the work directory as well, which the server is told.
     [Fact]
     public async Task Run_WithNoHlsDirectoryDeclared_DeclaresTheWorkDirectory()

@@ -212,6 +212,25 @@ public sealed class ConnectionSettings
     }
 
     /// <summary>
+    /// Gets whether another connection is of the same place: the same storage and root. Its name, credentials and the like may differ.
+    /// </summary>
+    /// <param name="other">The other connection.</param>
+    /// <returns>Whether files go to the same place in both.</returns>
+    public bool IsSamePlace(ConnectionSettings other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        return Type == other.Type
+            && string.Equals(Endpoint, other.Endpoint, StringComparison.Ordinal)
+            && string.Equals(Bucket, other.Bucket, StringComparison.Ordinal)
+            && string.Equals(BucketPath, other.BucketPath, StringComparison.Ordinal)
+            && string.Equals(Host, other.Host, StringComparison.Ordinal)
+            && Port == other.Port
+            && string.Equals(RemoteRoot, other.RemoteRoot, StringComparison.Ordinal)
+            && string.Equals(LocalRoot, other.LocalRoot, StringComparison.Ordinal)
+            && string.Equals(ServerPath, other.ServerPath, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Makes a copy of the connection whose root is a directory below its own.
     /// </summary>
     /// <param name="path">The directory in the connection, with forward slashes.</param>

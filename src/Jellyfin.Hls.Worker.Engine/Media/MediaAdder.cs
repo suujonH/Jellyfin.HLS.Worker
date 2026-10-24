@@ -618,7 +618,11 @@ public sealed class MediaAdder
             if (removed.Count > 0)
             {
                 _logger.LogInformation("删除上次添加 {Path} 留下的 {Count} 个文件", entryPath, removed.Count);
-                await RemoveAsync(removed, cancellationToken).ConfigureAwait(false);
+                if (!await RemoveAsync(removed, cancellationToken).ConfigureAwait(false))
+                {
+                    // Tried again by the next addition of the file.
+                    continue;
+                }
             }
 
             if (stale.Directory is { } directory)
@@ -630,10 +634,12 @@ public sealed class MediaAdder
         }
     }
 
-    // A connection that fails is left for the next addition to try again; a file the server took is only marked.
-    private async Task RemoveAsync(IReadOnlyList<StoredUpload> uploads, CancellationToken cancellationToken)
+    // A connection that fails is left for the next addition to try again; a file the server took is only marked. Whether nothing
+    // failed: the files of a connection that no longer exists cannot be removed by any addition.
+    private async Task<bool> RemoveAsync(IReadOnlyList<StoredUpload> uploads, CancellationToken cancellationToken)
     {
         var removed = new List<long>();
+        var complete = true;
         try
         {
             foreach (var group in uploads.GroupBy(u => u.ConnectionId))
@@ -663,6 +669,7 @@ public sealed class MediaAdder
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    complete = false;
                     _logger.LogWarning("删除 {Connection} 上留下的文件失败：{Message}", connection.Settings.Name, ex.Message);
                 }
             }
@@ -671,6 +678,8 @@ public sealed class MediaAdder
         {
             TryLog(() => _uploadLog.MarkRemoved(removed));
         }
+
+        return complete;
     }
 
     // The mark is left when it cannot be removed; it names an operation that ended, which the next addition takes the file from.
@@ -936,13 +945,24 @@ public sealed class MediaAdder
         }
 
         var sameJob = string.Equals(earlier?.LeaseToken, lease.LeaseToken, StringComparison.Ordinal);
-        if (earlier?.LeaseToken is not null && !sameJob)
+        IReadOnlyCollection<StoredUpload> uploaded;
+        try
         {
-            await RemoveAsync(_uploadLog.GetUncollected(operationId).Where(u => u.Kind == UploadKind.Hls).ToList(), cancellationToken).ConfigureAwait(false);
+            if (earlier?.LeaseToken is not null && !sameJob)
+            {
+                await RemoveAsync(_uploadLog.GetUncollected(operationId).Where(u => u.Kind == UploadKind.Hls).ToList(), cancellationToken).ConfigureAwait(false);
+            }
+
+            TryLog(() => _uploadLog.SetJob(operationId, lease.JobId, lease.LeaseToken));
+            uploaded = sameJob ? _uploadLog.GetUncollected(operationId).Where(u => u.Kind == UploadKind.Hls).ToList() : [];
+        }
+        catch
+        {
+            // The runner has not taken the slot yet.
+            _encoding.Release();
+            throw;
         }
 
-        TryLog(() => _uploadLog.SetJob(operationId, lease.JobId, lease.LeaseToken));
-        IReadOnlyCollection<StoredUpload> uploaded = sameJob ? _uploadLog.GetUncollected(operationId).Where(u => u.Kind == UploadKind.Hls).ToList() : [];
         if (!await _runner.RunEagerAsync(lease, plan, localPath, sha256, destination, context.LibraryId, _encoding, cancellationToken, file.Job, new EagerWork(operationId, directory, uploaded))
                 .ConfigureAwait(false))
         {
