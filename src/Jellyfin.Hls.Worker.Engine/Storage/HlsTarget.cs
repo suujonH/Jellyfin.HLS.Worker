@@ -1,18 +1,17 @@
+using System.Collections.Concurrent;
 using Jellyfin.Hls.Worker.Configuration;
+using Jellyfin.Hls.Worker.Jobs;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Hls.Worker.Storage;
 
 /// <summary>
-/// The root of the HLS store the worker writes to: a directory of a connection, and the name the server knows it by.
+/// A directory of a connection the worker writes renditions to.
 /// </summary>
 public sealed class HlsTarget
 {
     /// <summary>The marker in the root that tells the server the store is an HLS store.</summary>
     public const string MarkerName = ".jellyfin-hls";
-
-    /// <summary>How many files of a batch are written at the same time.</summary>
-    public const int Lanes = 4;
 
     private const int Attempts = 3;
 
@@ -23,24 +22,32 @@ public sealed class HlsTarget
     /// Initializes a new instance of the <see cref="HlsTarget"/> class.
     /// </summary>
     /// <param name="connection">The connection.</param>
-    /// <param name="settings">The directory in the connection.</param>
+    /// <param name="path">The directory in the connection, with forward slashes; empty for the connection itself.</param>
+    /// <param name="label">How the directory is shown in the log.</param>
     /// <param name="logger">The logger.</param>
-    public HlsTarget(StorageConnection connection, HlsTargetSettings settings, ILogger logger)
+    public HlsTarget(StorageConnection connection, string path, string label, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(path);
         Connection = connection;
-        var path = settings.Path.Trim('/');
+        path = path.Trim('/');
         _prefix = path.Length == 0 ? string.Empty : path + "/";
-        Base = settings.GetBase(connection.Settings);
+        Label = label;
         _logger = logger;
     }
 
     /// <summary>Gets the connection.</summary>
     public StorageConnection Connection { get; }
 
-    /// <summary>Gets the root as the server names it.</summary>
-    public string Base { get; }
+    /// <summary>Gets how the directory is shown in the log.</summary>
+    public string Label { get; }
+
+    /// <summary>
+    /// Gets the path in the connection of a file below the root.
+    /// </summary>
+    /// <param name="path">The path below the root, with forward slashes.</param>
+    /// <returns>The path in the connection.</returns>
+    public string GetPath(string path) => _prefix + path;
 
     /// <summary>
     /// Writes a test file to the root and deletes it again, then writes the marker if it is missing.
@@ -72,45 +79,123 @@ public sealed class HlsTarget
     }
 
     /// <summary>
-    /// Writes files below the root, <see cref="Lanes"/> at a time, each in a session of its own; a transient failure is tried again.
+    /// Writes files below the root, in order, as many at a time as the limiter lets, over the sessions it opened; a transient
+    /// failure is tried again.
     /// </summary>
     /// <param name="files">The files: the path below the root, with forward slashes, and the file to write.</param>
+    /// <param name="limiter">The places of the files written at the same time, shared by every upload of the worker.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="uploaded">Told of each file once it is written or failed: its path, the file, whether it was written, and why not.</param>
+    /// <param name="done">The paths in the connection written before; one that is still there is not written again.</param>
+    /// <param name="skipped">Told of each file not written again.</param>
     /// <returns>A task.</returns>
-    public async Task UploadAsync(IReadOnlyList<(string Path, string LocalFile)> files, CancellationToken cancellationToken)
+    public async Task UploadAsync(
+        IReadOnlyList<(string Path, string LocalFile)> files,
+        UploadLimiter limiter,
+        CancellationToken cancellationToken,
+        Action<string, string, bool, string?>? uploaded = null,
+        IReadOnlySet<string>? done = null,
+        Action? skipped = null)
     {
         ArgumentNullException.ThrowIfNull(files);
-        var next = -1;
+        ArgumentNullException.ThrowIfNull(limiter);
         using var failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var lanes = Enumerable.Range(0, Math.Min(Lanes, files.Count)).Select(_ => Task.Run(
-            async () =>
-            {
-                using var lane = new Lane();
-                try
-                {
-                    int index;
-                    while ((index = Interlocked.Increment(ref next)) < files.Count)
-                    {
-                        var (path, localFile) = files[index];
-                        await PutAsync(lane, _prefix + path, localFile, failed.Token).ConfigureAwait(false);
-                    }
-                }
-                catch
-                {
-                    // The other lanes stop too; the first error is the one reported.
-                    await failed.CancelAsync().ConfigureAwait(false);
-                    throw;
-                }
-            },
-            failed.Token)).ToList();
+        var idle = new ConcurrentBag<Lane>();
+        var running = new List<Task>();
         try
         {
-            await Task.WhenAll(lanes).ConfigureAwait(false);
+            foreach (var (path, localFile) in files)
+            {
+                try
+                {
+                    await limiter.WaitAsync(failed.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // A file failed, or the upload was stopped: no other file starts.
+                    break;
+                }
+
+                running.Add(Task.Run(() => UploadOneAsync(path, localFile, limiter, idle, failed, uploaded, done, skipped), CancellationToken.None));
+            }
+
+            await Task.WhenAll(running).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch when (!cancellationToken.IsCancellationRequested)
         {
-            throw lanes.Select(l => l.Exception?.InnerException).FirstOrDefault(e => e is not null and not OperationCanceledException)
+            throw running.Select(t => t.Exception?.InnerException).FirstOrDefault(e => e is not null and not OperationCanceledException)
                 ?? new OperationCanceledException();
+        }
+        finally
+        {
+            while (idle.TryTake(out var lane))
+            {
+                lane.Dispose();
+            }
+        }
+    }
+
+    // A file in a place of the limiter, over an idle session or a new one, which goes back to the idle ones when it is done with.
+    private async Task UploadOneAsync(
+        string path,
+        string localFile,
+        UploadLimiter limiter,
+        ConcurrentBag<Lane> idle,
+        CancellationTokenSource failed,
+        Action<string, string, bool, string?>? uploaded,
+        IReadOnlySet<string>? done,
+        Action? skipped)
+    {
+        var lane = idle.TryTake(out var free) ? free : new Lane();
+        try
+        {
+            if (done is not null && done.Contains(_prefix + path) && await IsThereAsync(lane, _prefix + path, failed.Token).ConfigureAwait(false))
+            {
+                skipped?.Invoke();
+            }
+            else
+            {
+                try
+                {
+                    await PutAsync(lane, _prefix + path, localFile, failed.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    uploaded?.Invoke(path, localFile, false, ex.Message);
+                    throw;
+                }
+
+                uploaded?.Invoke(path, localFile, true, null);
+            }
+
+            idle.Add(lane);
+        }
+        catch
+        {
+            // The other files stop too; the first error is the one reported.
+            lane.Dispose();
+            await failed.CancelAsync().ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            limiter.Release();
+        }
+    }
+
+    // A file written before that cannot be checked is written again.
+    private async Task<bool> IsThereAsync(Lane lane, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            lane.Session ??= await Connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            return await lane.Session.ExistsAsync(path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && StorageConnection.IsTransient(ex))
+        {
+            lane.Dispose();
+            return false;
         }
     }
 

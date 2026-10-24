@@ -4,17 +4,15 @@ using System.Text.Json.Serialization;
 namespace Jellyfin.Hls.Worker.Configuration;
 
 /// <summary>
-/// The settings of a worker, kept in one JSON file.
+/// The settings of a worker, kept by <see cref="SettingsStore"/>.
 /// </summary>
 public sealed class WorkerSettings
 {
     /// <summary>The H.264 encoders the worker can drive.</summary>
     public static readonly IReadOnlyList<string> Encoders = ["libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi"];
 
-    /// <summary>The TrueCache tool by its name, which is the one published with the worker when there is one.</summary>
-    public const string DefaultTrueCacheTool = "Jellyfin.TrueCache.Tool";
-
-    private static readonly JsonSerializerOptions _json = new()
+    /// <summary>Gets the JSON options the settings are stored with.</summary>
+    internal static JsonSerializerOptions Json { get; } = new()
     {
         WriteIndented = true,
         PropertyNameCaseInsensitive = true,
@@ -31,20 +29,11 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets the name the worker reports.</summary>
     public string Name { get; set; } = Environment.MachineName;
 
-    /// <summary>Gets or sets the ffmpeg executable.</summary>
-    public string Ffmpeg { get; set; } = "ffmpeg";
+    /// <summary>Gets or sets the id the server knows the worker by; <see cref="Guid.Empty"/> until the server gave one.</summary>
+    public Guid WorkerId { get; set; }
 
-    /// <summary>Gets or sets the ffprobe executable.</summary>
-    public string Ffprobe { get; set; } = "ffprobe";
-
-    /// <summary>
-    /// Gets or sets the TrueCache tool, which writes the entries of the media put on S3. The default is the tool in the folder
-    /// truecache next to the worker, or the one on the PATH.
-    /// </summary>
-    public string TrueCacheTool { get; set; } = DefaultTrueCacheTool;
-
-    /// <summary>Gets or sets the folder of the inputs and the jobs.</summary>
-    public string WorkDirectory { get; set; } = "work";
+    /// <summary>Gets or sets the folder of the inputs and the jobs; empty for <see cref="WorkerPaths.DefaultTempDirectory"/>.</summary>
+    public string TempDirectory { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the H.264 encoder.</summary>
     public string Encoder { get; set; } = "libx264";
@@ -61,6 +50,9 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets how many jobs upload at the same time.</summary>
     public int UploadConcurrency { get; set; } = 1;
 
+    /// <summary>Gets or sets how many HLS files the worker writes at the same time, over every job and directory.</summary>
+    public int UploadFileConcurrency { get; set; } = 4;
+
     /// <summary>Gets or sets the seconds between two polls that found nothing.</summary>
     public int PollSeconds { get; set; } = 10;
 
@@ -76,109 +68,71 @@ public sealed class WorkerSettings
     /// <summary>Gets or sets the connections to storage.</summary>
     public List<ConnectionSettings> Connections { get; set; } = [];
 
-    /// <summary>Gets or sets where the renditions are written.</summary>
-    public HlsTargetSettings? Hls { get; set; }
+    /// <summary>Gets or sets where the files of a library are saved.</summary>
+    public List<SchemeSettings> Schemes { get; set; } = [];
 
-    /// <summary>Gets or sets where the media added to each library goes by default.</summary>
+    /// <summary>Gets or sets the defaults of the libraries.</summary>
     public List<LibrarySettings> Libraries { get; set; } = [];
+
+    /// <summary>Gets or sets the libraries the server pre-encodes, and whether their jobs are claimed.</summary>
+    public List<PreEncodeSettings> PreEncodes { get; set; } = [];
 
     /// <summary>Gets the folder of the cached inputs.</summary>
     [JsonIgnore]
-    public string InputDirectory => Path.Combine(WorkDirectory, "inputs");
+    public string InputDirectory => Path.Combine(TempDirectory, "inputs");
 
     /// <summary>Gets the folder of the jobs.</summary>
     [JsonIgnore]
-    public string JobDirectory => Path.Combine(WorkDirectory, "jobs");
+    public string JobDirectory => Path.Combine(TempDirectory, "jobs");
 
-    /// <summary>Gets the database of the media this worker added.</summary>
+    /// <summary>Gets the folder of the renditions declared on this machine, by a scheme that declares no HLS directory; never cleaned up.</summary>
     [JsonIgnore]
-    public string DatabasePath => Path.Combine(WorkDirectory, "worker.db");
+    public string LocalHlsDirectory => Path.Combine(TempDirectory, "hls");
 
     /// <summary>
-    /// Reads and validates the settings. Relative paths are relative to the folder of the file.
+    /// Finds a connection by its id.
     /// </summary>
-    /// <param name="path">The file.</param>
-    /// <returns>The settings.</returns>
-    /// <exception cref="ArgumentException">The settings are not valid.</exception>
-    public static WorkerSettings Load(string path)
-    {
-        var settings = Read(path);
-        if (Environment.GetEnvironmentVariable("JELLYFIN_HLS_API_KEY") is { Length: > 0 } apiKey)
-        {
-            settings.ApiKey = apiKey;
-        }
-
-        settings.Resolve(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        settings.Validate();
-        return settings;
-    }
-
-    /// <summary>
-    /// Reads the settings as they are written, to be edited and saved again: relative paths are kept, the API key of the
-    /// environment is not used, and nothing is checked.
-    /// </summary>
-    /// <param name="path">The file.</param>
-    /// <returns>The settings.</returns>
-    /// <exception cref="ArgumentException">The file is not of settings.</exception>
-    public static WorkerSettings Read(string path)
-    {
-        WorkerSettings settings;
-        try
-        {
-            settings = JsonSerializer.Deserialize<WorkerSettings>(File.ReadAllText(path), _json) ?? throw new ArgumentException("配置文件为空。");
-        }
-        catch (JsonException ex)
-        {
-            throw new ArgumentException("配置文件无效：" + ex.Message, ex);
-        }
-
-        // A list written as null is an empty one; an item written as null is no setting; a text written as null is the default.
-        settings.Connections = settings.Connections?.Where(c => c is not null).ToList() ?? [];
-        settings.Libraries = settings.Libraries?.Where(l => l is not null).ToList() ?? [];
-        FillNulls(settings);
-        settings.Connections.ForEach(FillNulls);
-        settings.Libraries.ForEach(FillNulls);
-        if (settings.Hls is not null)
-        {
-            FillNulls(settings.Hls);
-        }
-
-        return settings;
-    }
-
-    private static void FillNulls<T>(T item)
-        where T : new()
-    {
-        var defaults = new T();
-        foreach (var property in typeof(T).GetProperties().Where(p => p.PropertyType == typeof(string) && p.CanWrite))
-        {
-            if (property.GetValue(item) is null)
-            {
-                property.SetValue(item, property.GetValue(defaults));
-            }
-        }
-    }
-
-    /// <summary>
-    /// Writes the settings.
-    /// </summary>
-    /// <param name="path">The file.</param>
-    public void Save(string path)
-    {
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(this, _json));
-        File.Move(temporary, path, true);
-    }
-
-    /// <summary>
-    /// Finds a connection by its name.
-    /// </summary>
-    /// <param name="name">The name.</param>
+    /// <param name="id">The id.</param>
     /// <returns>The connection.</returns>
     /// <exception cref="ArgumentException">There is no such connection.</exception>
-    public ConnectionSettings GetConnection(string name)
-        => Connections.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.Ordinal))
-            ?? throw new ArgumentException("没有名为 " + name + " 的连接。");
+    public ConnectionSettings GetConnection(Guid id)
+        => Connections.FirstOrDefault(c => c.Id.Equals(id)) ?? throw new ArgumentException("没有这个远程目录。");
+
+    /// <summary>
+    /// Finds a scheme by its id.
+    /// </summary>
+    /// <param name="id">The id; <c>null</c> for none.</param>
+    /// <returns>The scheme, or <c>null</c>.</returns>
+    public SchemeSettings? GetScheme(Guid? id)
+        => id is { } value ? Schemes.FirstOrDefault(s => s.Id.Equals(value)) : null;
+
+    /// <summary>
+    /// Gets the defaults of a library, or empty ones, which are not added to <see cref="Libraries"/>.
+    /// </summary>
+    /// <param name="libraryId">The library.</param>
+    /// <returns>The defaults.</returns>
+    public LibrarySettings GetLibrary(Guid libraryId)
+        => Libraries.FirstOrDefault(l => l.Id.Equals(libraryId)) ?? new LibrarySettings { Id = libraryId };
+
+    /// <summary>
+    /// Gets the qualities of the server the worker does not encode for a library.
+    /// </summary>
+    /// <param name="libraryId">The library.</param>
+    /// <returns>The qualities turned off; none for a library never refreshed.</returns>
+    public IReadOnlyList<int> GetDisabledQualities(Guid libraryId)
+        => PreEncodes.Find(p => p.LibraryId.Equals(libraryId))?.DisabledQualities ?? [];
+
+    /// <summary>
+    /// Leaves out of qualities of the server those the worker does not encode for a library.
+    /// </summary>
+    /// <param name="libraryId">The library.</param>
+    /// <param name="qualities">The qualities of the server.</param>
+    /// <returns>The qualities the worker encodes, in the same order.</returns>
+    public IReadOnlyList<int> FilterQualities(Guid libraryId, IEnumerable<int> qualities)
+    {
+        var disabled = GetDisabledQualities(libraryId);
+        return [.. qualities.Where(q => !disabled.Contains(q))];
+    }
 
     /// <summary>
     /// Checks the settings.
@@ -210,6 +164,11 @@ public sealed class WorkerSettings
             throw new ArgumentException("Concurrency 和 UploadConcurrency 应为 1–32。");
         }
 
+        if (UploadFileConcurrency is < 1 or > 64)
+        {
+            throw new ArgumentException("UploadFileConcurrency 应为 1–64。");
+        }
+
         if (Threads is < 0 or > 256 || PollSeconds is < 1 or > 3600 || ControlTimeoutSeconds is < 1 or > 600)
         {
             throw new ArgumentException("Threads 应为 0–256，PollSeconds 应为 1–3600，ControlTimeoutSeconds 应为 1–600。");
@@ -230,29 +189,31 @@ public sealed class WorkerSettings
             throw new ArgumentException("h264_vaapi 需要 HardwareDevice，例如 /dev/dri/renderD128。");
         }
 
-        if (Connections is null || Connections.Any(c => c is null))
-        {
-            throw new ArgumentException("Connections 应为对象数组。");
-        }
-
         var names = new HashSet<string>(StringComparer.Ordinal);
+        var ids = new HashSet<Guid> { SchemeEntry.JellyfinLibrary };
         foreach (var connection in Connections)
         {
             connection.Validate();
             if (!names.Add(connection.Name))
             {
-                throw new ArgumentException("连接名称重复：" + connection.Name);
+                throw new ArgumentException("远程目录名称重复：" + connection.Name);
+            }
+
+            if (!ids.Add(connection.Id))
+            {
+                throw new ArgumentException("远程目录 Id 重复：" + connection.Name);
             }
         }
 
-        if (Hls is not null)
+        // Schemes are referred to by their ids: two can have the same name.
+        ids.Clear();
+        foreach (var scheme in Schemes)
         {
-            Hls.Validate(GetConnection(Hls.Connection));
-        }
-
-        if (Libraries is null || Libraries.Any(l => l is null))
-        {
-            throw new ArgumentException("Libraries 应为对象数组。");
+            scheme.Validate(this);
+            if (scheme.Id.Equals(Guid.Empty) || !ids.Add(scheme.Id))
+            {
+                throw new ArgumentException("方案 " + scheme.Name + " 的 Id 为空或重复。");
+            }
         }
 
         if (Libraries.GroupBy(l => l.Id).FirstOrDefault(g => g.Count() > 1) is { } repeated)
@@ -264,45 +225,58 @@ public sealed class WorkerSettings
         {
             library.Validate(this);
         }
-    }
 
-    /// <summary>
-    /// Gets the default of a library, or one that puts the media directly into its folder.
-    /// </summary>
-    /// <param name="libraryId">The library.</param>
-    /// <returns>The default.</returns>
-    public LibrarySettings GetLibrary(Guid libraryId)
-        => Libraries.FirstOrDefault(l => l.Id.Equals(libraryId)) ?? new LibrarySettings { Id = libraryId };
-
-    private void Resolve(string directory)
-    {
-        WorkDirectory = Path.GetFullPath(WorkDirectory, directory);
-        Ffmpeg = ResolveProgram(Ffmpeg, directory);
-        Ffprobe = ResolveProgram(Ffprobe, directory);
-        TrueCacheTool = TrueCacheTool == DefaultTrueCacheTool && File.Exists(BundledTrueCacheTool)
-            ? BundledTrueCacheTool
-            : ResolveProgram(TrueCacheTool, directory);
-        foreach (var connection in Connections ?? [])
+        if (PreEncodes.GroupBy(l => l.LibraryId).FirstOrDefault(g => g.Count() > 1) is { } repeatedPreEncode)
         {
-            if (connection?.Type == ConnectionType.Local && !string.IsNullOrWhiteSpace(connection.LocalRoot))
-            {
-                connection.LocalRoot = Path.GetFullPath(connection.LocalRoot, directory);
-            }
-
-            if (connection?.Type == ConnectionType.Sftp && !string.IsNullOrWhiteSpace(connection.PrivateKeyPath))
-            {
-                connection.PrivateKeyPath = Path.GetFullPath(connection.PrivateKeyPath, directory);
-            }
+            throw new ArgumentException("预编码媒体库重复：" + repeatedPreEncode.Key);
         }
     }
 
-    /// <summary>Gets the TrueCache tool published with the worker, in the folder truecache next to it.</summary>
-    internal static string BundledTrueCacheTool => Path.Combine(
-        AppContext.BaseDirectory,
-        "truecache",
-        OperatingSystem.IsWindows() ? DefaultTrueCacheTool + ".exe" : DefaultTrueCacheTool);
+    /// <summary>
+    /// Mends settings as they were read: a list written as null is an empty one, an item written as null is no setting, and a text
+    /// written as null is the default.
+    /// </summary>
+    /// <param name="settings">The settings.</param>
+    internal static void Normalize(WorkerSettings settings)
+    {
+        FillNulls(settings);
+        settings.Connections = settings.Connections?.Where(c => c is not null).ToList() ?? [];
+        settings.Schemes = settings.Schemes?.Where(s => s is not null).ToList() ?? [];
+        settings.Libraries = settings.Libraries?.Where(l => l is not null).ToList() ?? [];
+        settings.PreEncodes = settings.PreEncodes?.Where(p => p is not null).ToList() ?? [];
+        settings.Connections.ForEach(FillNulls);
+        foreach (var scheme in settings.Schemes)
+        {
+            FillNulls(scheme);
+            scheme.Hls = scheme.Hls?.Where(e => e is not null).ToList() ?? [];
+            scheme.Sources = scheme.Sources?.Where(e => e is not null).ToList() ?? [];
+        }
 
-    // A bare name is looked up on the PATH; anything with a separator is a path.
-    private static string ResolveProgram(string program, string directory)
-        => program.Contains('/', StringComparison.Ordinal) || program.Contains('\\', StringComparison.Ordinal) ? Path.GetFullPath(program, directory) : program;
+        foreach (var library in settings.Libraries)
+        {
+            FillNulls(library);
+            library.Locations = library.Locations?.Where(l => l is not null).ToList() ?? [];
+            library.PreEncodeQualities ??= [];
+        }
+
+        foreach (var preEncode in settings.PreEncodes)
+        {
+            FillNulls(preEncode);
+            preEncode.Qualities ??= [];
+            preEncode.DisabledQualities ??= [];
+        }
+    }
+
+    private static void FillNulls<T>(T item)
+        where T : new()
+    {
+        var defaults = new T();
+        foreach (var property in typeof(T).GetProperties().Where(p => p.PropertyType == typeof(string) && p.CanWrite))
+        {
+            if (property.GetValue(item) is null)
+            {
+                property.SetValue(item, property.GetValue(defaults));
+            }
+        }
+    }
 }

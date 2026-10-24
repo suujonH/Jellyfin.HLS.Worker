@@ -17,9 +17,15 @@ public static class ProcessRunner
     /// <param name="arguments">The arguments.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="workingDirectory">The working directory, or <c>null</c> for the current one.</param>
+    /// <param name="outputLine">Told each line of the standard output as it is written, or <c>null</c>.</param>
     /// <returns>What the program wrote to its standard output.</returns>
     /// <exception cref="InvalidOperationException">The program failed; the message ends with what it wrote to its standard error.</exception>
-    public static async Task<string> RunAsync(string program, IEnumerable<string> arguments, CancellationToken cancellationToken, string? workingDirectory = null)
+    public static async Task<string> RunAsync(
+        string program,
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken,
+        string? workingDirectory = null,
+        Action<string>? outputLine = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         cancellationToken.ThrowIfCancellationRequested();
@@ -52,7 +58,7 @@ public static class ProcessRunner
             throw new InvalidOperationException("无法启动 " + program + "：" + ex.Message, ex);
         }
 
-        var output = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var output = outputLine is null ? process.StandardOutput.ReadToEndAsync(CancellationToken.None) : ReadLinesAsync(process.StandardOutput, outputLine);
         var error = process.StandardError.ReadToEndAsync(CancellationToken.None);
         try
         {
@@ -86,5 +92,17 @@ public static class ProcessRunner
         }
 
         return result;
+    }
+
+    private static async Task<string> ReadLinesAsync(StreamReader reader, Action<string> outputLine)
+    {
+        var text = new StringBuilder();
+        while (await reader.ReadLineAsync(CancellationToken.None).ConfigureAwait(false) is { } line)
+        {
+            outputLine(line);
+            text.Append(line).Append('\n');
+        }
+
+        return text.ToString();
     }
 }

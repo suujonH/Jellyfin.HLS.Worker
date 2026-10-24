@@ -1,13 +1,17 @@
 using System.Collections.ObjectModel;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Jellyfin.Hls.Worker.Configuration;
+using Jellyfin.Hls.Worker.Jobs;
+using Jellyfin.Hls.Worker.Media;
+using Jellyfin.Hls.Worker.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Hls.Worker.Gui.ViewModels;
 
 /// <summary>
-/// The window: the settings file being edited, the worker running its jobs, and the log.
+/// The window: the settings being edited, the worker running its jobs, the media being added, and the log.
 /// Everything here runs on the UI thread; the engine does its work on the thread pool.
 /// </summary>
 internal sealed partial class MainViewModel : ObservableObject, IDisposable
@@ -15,127 +19,125 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly GuiLog _log = new();
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger _logger;
+    private readonly SettingsStore _store;
+    private readonly HttpMessageHandler? _handler;
     private SharedEngine? _engine;
     private CancellationTokenSource? _stop;
     private Task? _run;
-    private CancellationTokenSource? _check;
-    private Task? _checking;
-    private bool _opening;
 
-    public MainViewModel(string configPath)
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MainViewModel"/> class with the settings stored.
+    /// </summary>
+    /// <param name="paths">Where the worker keeps its data.</param>
+    /// <param name="handler">The HTTP handler of the server, for tests.</param>
+    public MainViewModel(WorkerPaths paths, HttpMessageHandler? handler = null)
     {
+        _handler = handler;
         _loggerFactory = LoggerFactory.Create(builder => builder
             .SetMinimumLevel(LogLevel.Information)
             .AddFilter("System", LogLevel.Warning)
             .AddProvider(_log));
         _logger = _loggerFactory.CreateLogger("Jellyfin.Hls.Worker");
-        Add = new AddViewModel(this, _logger);
-        Open(configPath);
+        _store = new SettingsStore(paths);
+        Uploads = new UploadLogViewModel(new UploadLog(paths.Database));
+        try
+        {
+            Settings = _store.Read(out var imported);
+            if (imported)
+            {
+                _logger.LogInformation("已从 {Path} 导入配置", paths.LegacySettings);
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            Status = "无法读取配置：" + ex.Message;
+        }
+
+        foreach (var connection in Settings.Connections)
+        {
+            AddConnectionViewModel(connection);
+        }
+
+        TargetOptions.Rebuild(Settings.Connections);
+        foreach (var scheme in Settings.Schemes)
+        {
+            AddSchemeViewModel(scheme);
+        }
+
+        RebuildSchemeChoices();
+        foreach (var library in Settings.Libraries)
+        {
+            Libraries.Add(new LibraryViewModel(library, SchemeChoices));
+        }
+
+        foreach (var preEncode in Settings.PreEncodes)
+        {
+            AddPreEncodeViewModel(preEncode);
+        }
+
+        UpdatePreEncodeQualities();
+        SelectedConnection = Connections.FirstOrDefault();
+        SelectedScheme = Schemes.FirstOrDefault();
+        SelectedLibrary = Libraries.FirstOrDefault();
+        SelectedPreEncode = PreEncodes.FirstOrDefault();
     }
 
     public ObservableCollection<string> Log => _log.Lines;
 
-    public AddViewModel Add { get; }
+    public UploadLogViewModel Uploads { get; }
 
     public IReadOnlyList<string> Encoders { get; } = WorkerSettings.Encoders;
 
-    public IReadOnlyList<ConnectionType> ConnectionTypes { get; } = Enum.GetValues<ConnectionType>();
+    public IReadOnlyList<int> PartConcurrencies { get; } = ConnectionSettings.PartConcurrencies;
 
+    /// <summary>Gets the directory of the data of the worker.</summary>
+    public string DataDirectory => _store.Paths.DataDirectory;
+
+    /// <summary>Gets the directory of the temporary files when none is set.</summary>
+    public string DefaultTempDirectory => _store.Paths.DefaultTempDirectory;
+
+    /// <summary>Gets the settings being edited; they are written by <see cref="TrySave"/>.</summary>
     [ObservableProperty]
-    public partial string ConfigPath { get; private set; } = string.Empty;
-
-    /// <summary>Gets the settings as they are written in the file; <see cref="WorkerSettings.Hls"/> is never <c>null</c>.</summary>
-    [ObservableProperty]
-    public partial WorkerSettings Settings { get; private set; } = new() { Hls = new HlsTargetSettings() };
-
-    public ObservableCollection<ConnectionViewModel> Connections { get; } = [];
-
-    [ObservableProperty]
-    public partial ConnectionViewModel? SelectedConnection { get; set; }
-
-    /// <summary>Gets or sets the connection of the HLS root.</summary>
-    public ConnectionViewModel? HlsConnection
-    {
-        get => Connections.FirstOrDefault(c => c.Reference == Settings.Hls!.Connection);
-        set
-        {
-            // While the connections of another file are put in, the list clears the selection; the file's stays.
-            if (_opening)
-            {
-                return;
-            }
-
-            Settings.Hls!.Connection = value?.Reference ?? string.Empty;
-            OnPropertyChanged();
-        }
-    }
+    public partial WorkerSettings Settings { get; private set; } = new();
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartCommand), nameof(StopCommand))]
     public partial bool IsRunning { get; private set; }
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(CheckCommand))]
-    public partial bool IsChecking { get; private set; }
-
-    [ObservableProperty]
     public partial string Status { get; set; } = string.Empty;
 
-    /// <summary>Gets or sets what tells whether a field shown has text that is not a value; set by the window.</summary>
+    /// <summary>Gets or sets whether a field of the window holds text that is no value; set by the window.</summary>
     public Func<bool>? HasInputErrors { get; set; }
 
-    /// <summary>Gets whether an engine is in use, so changed settings apply only once it is released.</summary>
+    /// <summary>Gets or sets the dialogs; set by the window. Without them, nothing that needs one is done.</summary>
+    public IDialogs? Dialogs { get; set; }
+
     public bool IsEngineInUse => _engine is not null;
 
-    /// <summary>
-    /// Reads a settings file to edit; a file that does not exist yet is started with the defaults.
-    /// </summary>
-    /// <param name="path">The file.</param>
-    public void Open(string path)
+    /// <summary>Gets or sets the id of the worker as text: 32 hexadecimal digits, or empty for none yet.</summary>
+    /// <exception cref="ArgumentException">The text is no id; the field shows it.</exception>
+    public string WorkerIdText
     {
-        // The engine in use is of the file open; another file is opened once it is released.
-        if (IsEngineInUse || IsChecking)
+        get => Settings.WorkerId.Equals(Guid.Empty) ? string.Empty : Settings.WorkerId.ToString("N");
+        set
         {
-            Status = "正在运行、检查或添加：停止后再打开其他配置";
-            return;
-        }
-
-        WorkerSettings settings;
-        try
-        {
-            settings = File.Exists(path) ? WorkerSettings.Read(path) : new WorkerSettings();
-        }
-        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
-        {
-            Status = "无法读取 " + path + "：" + ex.Message;
-            return;
-        }
-
-        settings.Hls ??= new HlsTargetSettings();
-        _opening = true;
-        try
-        {
-            ConfigPath = path;
-            Settings = settings;
-            Connections.Clear();
-            foreach (var connection in settings.Connections)
+            var id = string.IsNullOrWhiteSpace(value) ? Guid.Empty
+                : Guid.TryParse(value.Trim(), out var parsed) ? parsed
+                : throw new ArgumentException("Worker Id 应为 uuid（32 位十六进制），或留空由服务器分配。");
+            if (!id.Equals(Settings.WorkerId))
             {
-                Connections.Add(new ConnectionViewModel(connection, Changed));
+                Settings.WorkerId = id;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(WorkerIdButtonText));
             }
-
-            SelectedConnection = Connections.FirstOrDefault();
         }
-        finally
-        {
-            _opening = false;
-        }
-
-        OnPropertyChanged(nameof(HlsConnection));
-        // The libraries were of the server of the file before.
-        Add.OnSettingsChanged();
-        Add.ClearLibraries();
-        Status = File.Exists(path) ? "已打开 " + path : "新配置，保存到 " + path;
     }
+
+    public string WorkerIdButtonText => Settings.WorkerId.Equals(Guid.Empty) ? "申请" : "重新申请";
+
+    // The API key a worker uses: the one of the environment, or the one set.
+    private string ApiKey => Environment.GetEnvironmentVariable("JELLYFIN_HLS_API_KEY") is { Length: > 0 } key ? key : Settings.ApiKey;
 
     /// <summary>
     /// Writes the settings, then reports whether a worker can start with them.
@@ -143,12 +145,6 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <returns>Whether the settings were written.</returns>
     public bool TrySave()
     {
-        if (ConfigPath.Length == 0)
-        {
-            Status = "没有打开配置文件：请在“设置”中打开一个配置";
-            return false;
-        }
-
         // A field whose text is no value keeps the value before, which is not what is shown.
         if (HasInputErrors?.Invoke() == true)
         {
@@ -156,30 +152,25 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             return false;
         }
 
-        // The settings know a connection whose name is not taken up by the name before, which another may have now.
-        if (Connections.FirstOrDefault(c => c.Reference != c.Name) is { } pending)
-        {
-            Status = "连接“" + pending.Name + "”的名称为空或与其它连接重名（含改名前的名称），请先改正";
-            return false;
-        }
-
         Settings.Connections = Connections.Select(c => c.Model).ToList();
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
-            Settings.Save(ConfigPath);
+            _store.Write(Settings);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or Microsoft.Data.Sqlite.SqliteException)
         {
             // An argument exception is a value JSON has no number for, such as NaN.
             Status = "保存失败：" + ex.Message;
             return false;
         }
 
-        var applies = IsEngineInUse ? "；正在运行的 Worker 停止后再开始才使用新配置" : string.Empty;
+        var applies = IsEngineInUse ? "；上传并发已立即生效，其他设置在正在运行的 Worker 停止后再开始才使用" : string.Empty;
         try
         {
-            WorkerSettings.Load(ConfigPath);
+            var loaded = _store.Load();
+
+            // The uploads of the running worker take the new limits at once; the rest waits for the next start.
+            _engine?.Engine.SetUploadLimits(loaded.UploadConcurrency, loaded.UploadFileConcurrency);
             Status = "已保存" + applies;
         }
         catch (ArgumentException ex)
@@ -190,118 +181,19 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         return true;
     }
 
-    [RelayCommand]
-    private void Save() => TrySave();
-
-    [RelayCommand]
-    private void NewConnection()
+    /// <summary>
+    /// Reads the libraries and the pre-encoded libraries from the server once, when it is set; a failure is only logged.
+    /// </summary>
+    public async void RefreshInBackground()
     {
-        var number = Connections.Count + 1;
-        while (Connections.Any(c => c.Name == "连接" + number || c.Reference == "连接" + number))
-        {
-            number++;
-        }
-
-        var name = "连接" + number;
-        var connection = new ConnectionViewModel(new ConnectionSettings { Name = name, Type = ConnectionType.S3 }, Changed);
-        Connections.Add(connection);
-        SelectedConnection = connection;
-        Add.OnSettingsChanged();
-    }
-
-    [RelayCommand]
-    private void RemoveConnection()
-    {
-        if (SelectedConnection is { } connection)
-        {
-            // A library whose default it was goes back to the folder of the library.
-            Settings.Libraries.RemoveAll(l => l.Connection == connection.Reference);
-            Connections.Remove(connection);
-            SelectedConnection = Connections.FirstOrDefault();
-            OnPropertyChanged(nameof(HlsConnection));
-            Add.OnSettingsChanged();
-
-            // A connection that waited for the name it was known by takes it up now.
-            foreach (var waiting in Connections.Where(c => c.Reference != c.Name).ToList())
-            {
-                waiting.TakeUpName();
-            }
-        }
-    }
-
-    [RelayCommand(CanExecute = nameof(CanStart))]
-    private async Task StartAsync()
-    {
-        if (!TrySave() || AcquireEngine() is not { } engine)
+        if (string.IsNullOrWhiteSpace(Settings.Server) || string.IsNullOrWhiteSpace(ApiKey))
         {
             return;
         }
 
-        IsRunning = true;
-        _stop = new CancellationTokenSource();
-        _run = RunAsync(engine, _stop.Token);
-        await _run;
+        await RefreshLibrariesAsync();
+        await RefreshPreEncodesAsync();
     }
-
-    private bool CanStart() => !IsRunning;
-
-    [RelayCommand(CanExecute = nameof(IsRunning))]
-    private void Stop()
-    {
-        if (_stop is { IsCancellationRequested: false } stop)
-        {
-            _logger.LogInformation("正在停止，进行中的任务结束后退出");
-            stop.Cancel();
-        }
-    }
-
-    [RelayCommand(CanExecute = nameof(CanCheck))]
-    private async Task CheckAsync()
-    {
-        // An engine of its own, of the settings just saved: the one running may be of settings before. A check does not use
-        // the work directory, which the running engine holds.
-        if (!TrySave() || LoadSettings() is not { } settings)
-        {
-            return;
-        }
-
-        IsChecking = true;
-        _check = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        _checking = CheckCoreAsync(settings, _check.Token);
-        await _checking;
-    }
-
-    private async Task CheckCoreAsync(WorkerSettings settings, CancellationToken cancellationToken)
-    {
-        WorkerEngine? engine = null;
-        try
-        {
-            engine = new WorkerEngine(settings, _loggerFactory);
-            await Preflight.CheckAsync(settings, engine, _logger, cancellationToken);
-            _logger.LogInformation("检查通过");
-            Status = "检查通过";
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogError("检查超时");
-            Status = "检查超时";
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError("检查失败：{Message}", ex.Message);
-            Status = "检查失败：" + ex.Message;
-        }
-        finally
-        {
-            engine?.Dispose();
-            IsChecking = false;
-            _checking = null;
-            _check?.Dispose();
-            _check = null;
-        }
-    }
-
-    private bool CanCheck() => !IsChecking;
 
     /// <summary>
     /// Gets the engine of the saved settings: the one in use, or a new one. Each call is matched by <see cref="ReleaseEngine"/>.
@@ -319,7 +211,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             // Settings that pass the checks may still be refused here, such as an API key with a line break in it.
             try
             {
-                _engine = new SharedEngine(settings, new WorkerEngine(settings, _loggerFactory));
+                var engine = new WorkerEngine(settings, _store, _loggerFactory, _handler);
+                engine.WorkerIdAssigned += id => Dispatcher.UIThread.Post(() => SetWorkerId(id));
+                _engine = new SharedEngine(settings, engine);
             }
             catch (Exception ex)
             {
@@ -333,22 +227,6 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         return _engine;
     }
 
-    // The saved settings as a worker uses them, or null when they cannot be used, which is shown.
-    private WorkerSettings? LoadSettings()
-    {
-        try
-        {
-            var settings = WorkerSettings.Load(ConfigPath);
-            return settings.Hls is null ? throw new ArgumentException("需要配置 Hls：写入 HLS 的连接和目录。") : settings;
-        }
-        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
-        {
-            _logger.LogError("{Message}", ex.Message);
-            Status = ex.Message;
-            return null;
-        }
-    }
-
     /// <summary>Releases the engine; the last user disposes it.</summary>
     public void ReleaseEngine()
     {
@@ -360,17 +238,18 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Stops the worker and an addition in progress, and waits for them, before the window closes.
+    /// Stops the worker, the additions and the tests in progress, and waits for them, before the window closes.
     /// </summary>
     /// <returns>A task.</returns>
     public async Task ShutdownAsync()
     {
         Stop();
-        _check?.Cancel();
-        await Add.CancelAndWaitAsync();
-        if (_checking is { } checking)
+        CancelAllAdds();
+        await _tests.CancelAsync();
+        await Task.WhenAll(_testing);
+        if (_adding is { } adding)
         {
-            await checking;
+            await adding;
         }
 
         if (_run is { } run)
@@ -382,20 +261,149 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _stop?.Dispose();
-        _check?.Dispose();
-        Add.Dispose();
+        _addCancel?.Dispose();
+        _tests.Dispose();
         _engine?.Engine.Dispose();
         _loggerFactory.Dispose();
     }
 
-    private async Task RunAsync(SharedEngine engine, CancellationToken cancellationToken)
+    // A client of the server as it is set, saved or not, for what needs no worker.
+    private ServerClient? CreateClient()
+    {
+        if (!Uri.TryCreate(Settings.Server, UriKind.Absolute, out var server) || server.Scheme is not ("http" or "https") || string.IsNullOrWhiteSpace(ApiKey))
+        {
+            Status = "需要服务器地址和 API Key（“设置 → 全局设置”）";
+            return null;
+        }
+
+        try
+        {
+            return new ServerClient(server, ApiKey, TimeSpan.FromSeconds(Math.Clamp(Settings.ControlTimeoutSeconds, 1, 600)), _handler);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException)
+        {
+            Status = ex.Message;
+            return null;
+        }
+    }
+
+    private void SetWorkerId(Guid id)
+    {
+        Settings.WorkerId = id;
+        OnPropertyChanged(nameof(WorkerIdText));
+        OnPropertyChanged(nameof(WorkerIdButtonText));
+    }
+
+    [RelayCommand]
+    private void Save() => TrySave();
+
+    // A new id forgets the media added as files of this machine with the one before: the server gives their jobs to that id.
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task RequestWorkerIdAsync()
+    {
+        if (!Settings.WorkerId.Equals(Guid.Empty)
+            && (Dialogs is not { } dialogs
+                || !await dialogs.ConfirmAsync("重新申请后，之前用旧 Id 添加的 worker-local 媒体不会再下发给本机。确定？", "重新申请", "取消")))
+        {
+            return;
+        }
+
+        if (!TrySave() || CreateClient() is not { } client)
+        {
+            return;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var id = await client.RegisterWorkerAsync(null, Settings.Name, CancellationToken.None);
+                SetWorkerId(id);
+                _store.SetWorkerId(id);
+                _logger.LogInformation("服务器分配了 Worker Id {WorkerId}", id.ToString("N"));
+                Status = "已申请 Worker Id";
+            }
+            catch (Exception ex) when (ex is ServerException or HttpRequestException or TaskCanceledException)
+            {
+                _logger.LogError("申请 Worker Id 失败：{Message}", ex.Message);
+                Status = "申请 Worker Id 失败：" + ex.Message;
+            }
+        }
+    }
+
+    // The libraries pre-encoded are offered with the schemes their jobs are run with; the others are left to other workers.
+    [RelayCommand(CanExecute = nameof(CanStart))]
+    private async Task StartAsync()
+    {
+        if (Dialogs is not { } dialogs || !TrySave() || AcquireEngine() is not { } engine)
+        {
+            return;
+        }
+
+        var dialog = new AddDialogViewModel(AddDialogMode.Start, engine.Settings, engine.Engine.GetLibrariesAsync, engine.Engine.GetPreEncodedLibrariesAsync, []);
+        while (true)
+        {
+            if (!await dialogs.ShowAddDialogAsync(dialog))
+            {
+                ReleaseEngine();
+                return;
+            }
+
+            if (dialog.Plans.Count == 0)
+            {
+                Status = "没有可以领取任务的媒体库。";
+                ReleaseEngine();
+                return;
+            }
+
+            if (dialog.Unconfigured.Count == 0
+                || await dialogs.ConfirmAsync("以下媒体库未配置，将会跳过该媒体库下的任务：\n" + string.Join("\n", dialog.Unconfigured), "继续", "返回"))
+            {
+                break;
+            }
+        }
+
+        IsRunning = true;
+        _stop = new CancellationTokenSource();
+        _run = RunAsync(engine, dialog.Plans, _stop.Token);
+        await _run;
+    }
+
+    private bool CanStart() => !IsRunning;
+
+    [RelayCommand(CanExecute = nameof(IsRunning))]
+    private void Stop()
+    {
+        if (_stop is { IsCancellationRequested: false } stop)
+        {
+            _logger.LogInformation("正在停止，进行中的任务结束后退出");
+            stop.Cancel();
+        }
+    }
+
+    // The saved settings as a worker uses them, or null when they cannot be used, which is shown.
+    private WorkerSettings? LoadSettings()
+    {
+        try
+        {
+            return _store.Load();
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            _logger.LogError("{Message}", ex.Message);
+            Status = ex.Message;
+            return null;
+        }
+    }
+
+    private async Task RunAsync(SharedEngine engine, IReadOnlyDictionary<Guid, HlsPlan> plans, CancellationToken cancellationToken)
     {
         Status = "运行中";
         int code;
         try
         {
             // On the thread pool: the work directory is cleaned before anything is awaited.
-            code = await Task.Run(() => engine.Engine.RunAsync(false, cancellationToken), CancellationToken.None);
+            code = await Task.Run(() => engine.Engine.RunAsync(plans, false, cancellationToken), CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
@@ -421,55 +429,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         };
     }
 
-    // The HLS root, the defaults of the libraries and the destination chosen follow a connection that is renamed; the
-    // destinations are those of the S3 connections.
-    // An empty name is that of the folder of the library, never of a connection, and a name another connection has is its
-    // own: a connection whose name is either while it is retyped takes nothing over.
-    private bool Changed(ConnectionViewModel connection, string old, string name)
-    {
-        // A retyped connection is told the name it is known by, whatever name it has now. The name another connection is
-        // known by is its own too, while that one is retyped.
-        var retyped = old == name;
-        if (!retyped && (name.Length == 0 || Connections.Any(c => c != connection && (c.Name == name || c.Reference == name))))
-        {
-            return false;
-        }
-
-        var renamed = !retyped && old.Length > 0;
-        if (renamed)
-        {
-            if (Settings.Hls!.Connection == old)
-            {
-                Settings.Hls.Connection = name;
-            }
-
-            foreach (var library in Settings.Libraries.Where(l => l.Connection == old))
-            {
-                library.Connection = name;
-            }
-        }
-
-        // A library whose default is no longer an S3 connection goes back to the folder of the library.
-        if (name.Length > 0 && !connection.IsS3)
-        {
-            Settings.Libraries.RemoveAll(l => l.Connection == name);
-        }
-
-        OnPropertyChanged(nameof(HlsConnection));
-        Add.OnSettingsChanged(renamed ? old : null, name);
-
-        // A connection that waited for the name given up takes it up now.
-        if (renamed && Connections.FirstOrDefault(c => c != connection && c.Name == old) is { } waiting)
-        {
-            waiting.TakeUpName();
-        }
-
-        return true;
-    }
 }
 
 /// <summary>
-/// An engine, with the settings it was made with, shared by the run, a check and an addition.
+/// An engine, with the settings it was made with, shared by the run and the additions.
 /// </summary>
 /// <param name="Settings">The settings, as loaded.</param>
 /// <param name="Engine">The engine.</param>

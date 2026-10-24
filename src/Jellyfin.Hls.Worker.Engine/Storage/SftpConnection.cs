@@ -90,7 +90,7 @@ internal sealed class SftpConnection : StorageConnection
     {
         private readonly HashSet<string> _directories = new(StringComparer.Ordinal);
 
-        public async Task PutAsync(string path, string localFile, CancellationToken cancellationToken)
+        public async Task PutAsync(string path, string localFile, CancellationToken cancellationToken, Action<long>? sent = null)
         {
             var destination = root + "/" + path;
             await CreateDirectoryAsync(destination[..destination.LastIndexOf('/')], cancellationToken).ConfigureAwait(false);
@@ -100,7 +100,11 @@ internal sealed class SftpConnection : StorageConnection
                 var from = File.OpenRead(localFile);
                 await using (from.ConfigureAwait(false))
                 {
-                    await client.UploadFileAsync(from, temporary, cancellationToken).ConfigureAwait(false);
+                    Stream counted = sent is null ? from : new ProgressStream(from, sent);
+                    await using (counted.ConfigureAwait(false))
+                    {
+                        await client.UploadFileAsync(counted, temporary, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 // SFTP version 3 does not rename onto an existing file; the file there is moved aside until the new one is in

@@ -1,7 +1,8 @@
 namespace Jellyfin.Hls.Worker.Jobs;
 
 /// <summary>
-/// The work directory of a worker: the cached inputs and a directory per job. It is locked, so two workers never share it.
+/// The work directory of a worker: the cached inputs, a directory per job and one per addition of a file, which is kept across runs
+/// for the addition to be resumed. It is locked, so two workers never share it.
 /// </summary>
 public sealed class WorkArea : IDisposable
 {
@@ -30,8 +31,10 @@ public sealed class WorkArea : IDisposable
 
         Jobs = Path.Combine(root, "jobs");
         Inputs = Path.Combine(root, "inputs");
+        Operations = Path.Combine(root, "operations");
         Directory.CreateDirectory(Jobs);
         Directory.CreateDirectory(Inputs);
+        Directory.CreateDirectory(Operations);
         if (!keepFailedJobs)
         {
             foreach (var directory in Directory.EnumerateDirectories(Jobs))
@@ -49,6 +52,9 @@ public sealed class WorkArea : IDisposable
 
     /// <summary>Gets the directory of the jobs.</summary>
     public string Jobs { get; }
+
+    /// <summary>Gets the directory of the additions of files, one directory per operation.</summary>
+    public string Operations { get; }
 
     /// <summary>
     /// Creates the directory of a job.
@@ -73,6 +79,49 @@ public sealed class WorkArea : IDisposable
         if (!string.Equals(Path.GetDirectoryName(resolved), Jobs, comparison) || !IsOwned(resolved))
         {
             throw new ArgumentException("只能删除 Worker 自己创建的任务目录：" + path, nameof(path));
+        }
+
+        Directory.Delete(resolved, true);
+    }
+
+    /// <summary>
+    /// Creates the directory of an operation, or gives the one it has.
+    /// </summary>
+    /// <param name="id">The operation.</param>
+    /// <returns>The directory.</returns>
+    public string CreateOperation(string id)
+    {
+        if (!Guid.TryParseExact(id, "N", out _))
+        {
+            throw new ArgumentException("操作 id 不是 32 位十六进制：" + id, nameof(id));
+        }
+
+        var path = Path.Combine(Operations, id);
+        if (!Directory.Exists(path))
+        {
+            Directory.CreateDirectory(path);
+            File.WriteAllText(Path.Combine(path, OwnerFile), "jellyfin-hls-worker");
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Removes the directory of an operation; only one this class created. One that is gone is left.
+    /// </summary>
+    /// <param name="path">The directory.</param>
+    public void RemoveOperation(string path)
+    {
+        var resolved = Path.GetFullPath(path);
+        if (!Directory.Exists(resolved))
+        {
+            return;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(Path.GetDirectoryName(resolved), Operations, comparison) || !IsOwned(resolved))
+        {
+            throw new ArgumentException("只能删除 Worker 自己创建的操作目录：" + path, nameof(path));
         }
 
         Directory.Delete(resolved, true);

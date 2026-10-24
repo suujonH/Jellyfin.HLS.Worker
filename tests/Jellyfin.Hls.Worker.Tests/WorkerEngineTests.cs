@@ -4,6 +4,7 @@ using System.Text.Json;
 using Jellyfin.Hls.Worker.Configuration;
 using Jellyfin.Hls.Worker.Media;
 using Jellyfin.Hls.Worker.Protocol;
+using Jellyfin.Hls.Worker.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -29,11 +30,17 @@ public sealed class FfmpegFactAttribute : FactAttribute
 public sealed class WorkerEngineTests : IDisposable
 {
     private static readonly Guid _jobId = Guid.NewGuid();
+    private static readonly Guid _library = Guid.NewGuid();
+    private static readonly Guid _worker = Guid.NewGuid();
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "hls-worker-engine-" + Guid.NewGuid().ToString("N"));
+    private readonly ConnectionSettings _local;
+    private readonly SettingsStore _store;
 
     public WorkerEngineTests()
     {
         Directory.CreateDirectory(Path.Combine(_directory, "root"));
+        _local = new ConnectionSettings { Id = Guid.NewGuid(), Name = "local", Type = ConnectionType.Worker, LocalRoot = Path.Combine(_directory, "root") };
+        _store = new SettingsStore(new WorkerPaths(Path.Combine(_directory, "data")));
     }
 
     public void Dispose() => Directory.Delete(_directory, true);
@@ -47,25 +54,14 @@ public sealed class WorkerEngineTests : IDisposable
         var polled = 0;
         Completion? completion = null;
         Identification? identification = null;
-        var server = new FakeServer(async (request, body) =>
+        var server = Serve(async (path, body) =>
         {
-            var path = request.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/Protocol", StringComparison.Ordinal))
-            {
-                return FakeServer.Json(new ProtocolVersion(1));
-            }
-
-            if (path.EndsWith("/Bases/Check", StringComparison.Ordinal))
-            {
-                return FakeServer.Json(new StoreTestResult(true, true, null));
-            }
-
             if (path.EndsWith("/Poll", StringComparison.Ordinal))
             {
                 return Interlocked.Increment(ref polled) == 1
                     ? FakeServer.Json(new WorkAssignment(
                         new WorkLease(_jobId, TestPlans.Attempt, 300, 1),
-                        new SourceFile(Guid.NewGuid(), Guid.NewGuid(), "/media/clip.mkv", new FileInfo(clip).Length, DateTime.UtcNow),
+                        new SourceFile(Guid.NewGuid(), _library, "/media/clip.mkv", new FileInfo(clip).Length, DateTime.UtcNow),
                         "HlsWorker/Jobs/" + _jobId.ToString("N") + "/Input?leaseToken=" + TestPlans.Attempt))
                     : FakeServer.Status(HttpStatusCode.NoContent);
             }
@@ -87,26 +83,22 @@ public sealed class WorkerEngineTests : IDisposable
                 return FakeServer.Status(HttpStatusCode.Accepted);
             }
 
-            return FakeServer.Status(path.EndsWith("/Heartbeat", StringComparison.Ordinal) ? HttpStatusCode.NoContent : HttpStatusCode.NotFound);
+            return null;
         });
-        var settings = new WorkerSettings
-        {
-            ApiKey = "k",
-            Name = "test",
-            WorkDirectory = Path.Combine(_directory, "work"),
-            InputCacheGiB = 0,
-            Connections = [new ConnectionSettings { Name = "local", Type = ConnectionType.Local, LocalRoot = Path.Combine(_directory, "root") }],
-            Hls = new HlsTargetSettings { Connection = "local", Path = "hls" }
-        };
-        using var engine = new WorkerEngine(settings, NullLoggerFactory.Instance, server);
+        var settings = Settings();
+        settings.InputCacheGiB = 0;
+        settings.PreEncodes.Add(new PreEncodeSettings { LibraryId = _library, Qualities = [1080, 720], DisabledQualities = [720] });
+        var hls = Hls(settings, "hls");
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
 
-        var result = await engine.RunAsync(true, CancellationToken.None);
+        var result = await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = hls }, true, CancellationToken.None);
 
         Assert.Equal(WorkerEngine.Success, result);
         Assert.DoesNotContain(server.Paths, p => p.EndsWith("/Failed", StringComparison.Ordinal));
         Assert.Equal(sha, identification!.Sha256);
-        Assert.Equal(engine.Target.Base, identification.Base);
+        Assert.Equal(hls.Base, identification.Base);
         Assert.Contains("\"streams\"", identification.ProbeJson, StringComparison.Ordinal);
+        Assert.Equal([720], identification.ExcludedQualities!);
 
         Assert.NotNull(completion);
         Assert.Equal(TestPlans.Attempt, completion.LeaseToken);
@@ -121,23 +113,28 @@ public sealed class WorkerEngineTests : IDisposable
         // The audio ends after 8 seconds and is padded to the 13.5 of the media.
         Assert.InRange(completion.Renditions[2].SegmentDurations.Sum(), 13.4, 13.6);
 
-        var hls = Path.Combine(_directory, "root", "hls");
-        Assert.True(File.Exists(Path.Combine(hls, ".jellyfin-hls")));
+        var root = Path.Combine(_directory, "root", "hls");
+        Assert.True(File.Exists(Path.Combine(root, ".jellyfin-hls")));
         foreach (var (rendition, output) in plan.Renditions.Zip(completion.Renditions))
         {
             foreach (var file in output.Files)
             {
-                var uploaded = new FileInfo(Path.Combine(hls, rendition.RelativeDirectory, file.Path));
+                var uploaded = new FileInfo(Path.Combine(root, rendition.RelativeDirectory, file.Path));
                 Assert.True(uploaded.Exists, uploaded.FullName);
                 Assert.Equal(file.Length, uploaded.Length);
             }
 
-            Assert.False(File.Exists(Path.Combine(hls, rendition.RelativeDirectory, HlsEncoder.PlaylistFile)));
+            Assert.False(File.Exists(Path.Combine(root, rendition.RelativeDirectory, HlsEncoder.PlaylistFile)));
         }
 
-        var vtt = await File.ReadAllTextAsync(Path.Combine(hls, plan.Renditions[3].RelativeDirectory, "subtitle.vtt"));
+        var vtt = await File.ReadAllTextAsync(Path.Combine(root, plan.Renditions[3].RelativeDirectory, "subtitle.vtt"));
         Assert.StartsWith("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000", vtt, StringComparison.Ordinal);
         Assert.Contains("Hello", vtt, StringComparison.Ordinal);
+
+        // Every file uploaded is recorded.
+        var uploads = new Jobs.UploadLog(_store.Paths.Database).Recent(5000);
+        Assert.Equal(completion.Renditions.Sum(r => r.Files.Count), uploads.Count);
+        Assert.All(uploads, u => Assert.Equal((Jobs.UploadKind.Hls, (Guid?)_library, true), (u.Kind, u.LibraryId, u.Succeeded)));
 
         // The job directory is gone, and with a cache of 0 GiB the input too.
         Assert.Empty(Directory.GetDirectories(Path.Combine(_directory, "work", "jobs")));
@@ -150,35 +147,23 @@ public sealed class WorkerEngineTests : IDisposable
         var clip = await CreateClipAsync(_directory);
         string? failure = null;
         var polled = 0;
-        var server = new FakeServer(async (request, body) =>
+        var server = Serve(async (path, body) => path switch
         {
-            var path = request.RequestUri!.AbsolutePath;
-            return path switch
-            {
-                _ when path.EndsWith("/Protocol", StringComparison.Ordinal) => FakeServer.Json(new ProtocolVersion(1)),
-                _ when path.EndsWith("/Bases/Check", StringComparison.Ordinal) => FakeServer.Json(new StoreTestResult(true, true, null)),
-                _ when path.EndsWith("/Poll", StringComparison.Ordinal) => Interlocked.Increment(ref polled) == 1
-                    ? FakeServer.Json(new WorkAssignment(
-                        new WorkLease(_jobId, TestPlans.Attempt, 300, 1),
-                        new SourceFile(Guid.NewGuid(), Guid.NewGuid(), "/media/clip.mkv", new FileInfo(clip).Length, DateTime.UtcNow),
-                        "HlsWorker/Jobs/x/Input"))
-                    : FakeServer.Status(HttpStatusCode.NoContent),
-                _ when path.EndsWith("/Input", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(await File.ReadAllBytesAsync(clip)) },
-                _ when path.EndsWith("/Identify", StringComparison.Ordinal) => FakeServer.Json(new IdentifyResponse(false, TestPlans.Plan(3))),
-                _ when path.EndsWith("/Failed", StringComparison.Ordinal) => Record(body),
-                _ => FakeServer.Status(HttpStatusCode.NoContent)
-            };
+            _ when path.EndsWith("/Poll", StringComparison.Ordinal) => Interlocked.Increment(ref polled) == 1
+                ? FakeServer.Json(new WorkAssignment(
+                    new WorkLease(_jobId, TestPlans.Attempt, 300, 1),
+                    new SourceFile(Guid.NewGuid(), _library, "/media/clip.mkv", new FileInfo(clip).Length, DateTime.UtcNow),
+                    "HlsWorker/Jobs/x/Input"))
+                : FakeServer.Status(HttpStatusCode.NoContent),
+            _ when path.EndsWith("/Input", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(await File.ReadAllBytesAsync(clip)) },
+            _ when path.EndsWith("/Identify", StringComparison.Ordinal) => FakeServer.Json(new IdentifyResponse(false, TestPlans.Plan(3))),
+            _ when path.EndsWith("/Failed", StringComparison.Ordinal) => Record(body),
+            _ => null
         });
-        var settings = new WorkerSettings
-        {
-            ApiKey = "k",
-            WorkDirectory = Path.Combine(_directory, "work"),
-            Connections = [new ConnectionSettings { Name = "local", Type = ConnectionType.Local, LocalRoot = Path.Combine(_directory, "root") }],
-            Hls = new HlsTargetSettings { Connection = "local" }
-        };
-        using var engine = new WorkerEngine(settings, NullLoggerFactory.Instance, server);
+        var settings = Settings();
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
 
-        Assert.Equal(WorkerEngine.Failed, await engine.RunAsync(true, CancellationToken.None));
+        Assert.Equal(WorkerEngine.Failed, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, string.Empty) }, true, CancellationToken.None));
         Assert.Contains("SHA-256", failure, StringComparison.Ordinal);
         Assert.DoesNotContain(server.Paths, p => p.EndsWith("/Complete", StringComparison.Ordinal));
 
@@ -193,22 +178,142 @@ public sealed class WorkerEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task Run_RegistersAndClaimsTheJobsOfItsLibrariesOnly()
+    {
+        var other = Guid.NewGuid();
+        var assigned = Guid.Empty;
+        var server = Serve((path, _) => Task.FromResult(path.EndsWith("/Poll", StringComparison.Ordinal) ? FakeServer.Status(HttpStatusCode.NoContent) : null));
+        var settings = Settings();
+        var off = Guid.NewGuid();
+        settings.PreEncodes.Add(new PreEncodeSettings { LibraryId = _library, Qualities = [1080, 720], DisabledQualities = [720] });
+        settings.PreEncodes.Add(new PreEncodeSettings { LibraryId = off, Name = "Off", Qualities = [480], DisabledQualities = [480] });
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+        engine.WorkerIdAssigned += id => assigned = id;
+
+        Assert.Equal(
+            WorkerEngine.Success,
+            await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, "a"), [other] = Hls(settings, "b"), [off] = Hls(settings, "c") }, true, CancellationToken.None));
+
+        Assert.Equal(_worker, assigned);
+        Assert.Equal(_worker, _store.Read().WorkerId);
+        var registration = JsonSerializer.Deserialize<WorkerRegistration>(Body(server, "/Workers"), ServerClient.Json)!;
+        Assert.Equal(new WorkerRegistration(null, "test"), registration);
+        var poll = JsonSerializer.Deserialize<WorkerRequest>(Body(server, "/Poll"), ServerClient.Json)!;
+        Assert.Equal(("test", _worker), (poll.Worker, poll.WorkerId));
+        Assert.Equal(new[] { _library, other }.Order(), poll.Libraries!.Order());
+        Assert.Empty(poll.ExcludedItems!);
+
+        // The qualities turned off; a library with every quality turned off is not asked for.
+        var filter = Assert.Single(poll.ExcludedQualities!);
+        Assert.Equal(_library, filter.LibraryId);
+        Assert.Equal([720], filter.Excluded);
+    }
+
+    [Fact]
+    public async Task Run_ALibraryWithEveryQualityTurnedOff_IsClaimedForAQualityTheServerAdded()
+    {
+        var off = Guid.NewGuid();
+        var server = Serve((path, _) => Task.FromResult(path switch
+        {
+            _ when path.EndsWith("/Poll", StringComparison.Ordinal) => FakeServer.Status(HttpStatusCode.NoContent),
+            _ when path.EndsWith("/Libraries", StringComparison.Ordinal) => FakeServer.Json(new[] { new WorkerLibrary(off, "Off", [720, 480]) }),
+            _ => null
+        }));
+        var settings = Settings();
+        settings.PreEncodes.Add(new PreEncodeSettings { LibraryId = off, Name = "Off", Qualities = [480], DisabledQualities = [480] });
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+
+        Assert.Equal(WorkerEngine.Success, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [off] = Hls(settings, "c") }, true, CancellationToken.None));
+
+        var poll = JsonSerializer.Deserialize<WorkerRequest>(Body(server, "/Poll"), ServerClient.Json)!;
+        Assert.Equal([off], poll.Libraries!);
+        Assert.Equal([480], Assert.Single(poll.ExcludedQualities!).Excluded);
+    }
+
+    // No HLS directory declared: the renditions are kept in the work directory as well, which the server is told.
+    [Fact]
+    public async Task Run_WithNoHlsDirectoryDeclared_DeclaresTheWorkDirectory()
+    {
+        var server = Serve((path, _) => Task.FromResult(path.EndsWith("/Poll", StringComparison.Ordinal) ? FakeServer.Status(HttpStatusCode.NoContent) : null));
+        var settings = Settings();
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+
+        Assert.Equal(WorkerEngine.Success, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, "a", declare: false) }, true, CancellationToken.None));
+
+        var local = Path.Combine(_directory, "work", "hls", "a");
+        Assert.Equal(WorkerLocalAddress.Format(_worker, local), JsonSerializer.Deserialize<BaseRequest>(Body(server, "/Bases/Check"), ServerClient.Json)!.Base);
+        Assert.True(File.Exists(Path.Combine(local, HlsTarget.MarkerName)));
+        Assert.True(File.Exists(Path.Combine(_local.LocalRoot, "a", HlsTarget.MarkerName)));
+    }
+
+    [Fact]
+    public async Task Run_GivesBackAJobWhoseFileIsNotOnThisWorker_AndSkipsItsItemUntilTheNextRun()
+    {
+        var item = Guid.NewGuid();
+        var polled = 0;
+        var missing = Path.Combine(_directory, "missing.mkv");
+        var server = Serve((path, _) => Task.FromResult(path switch
+        {
+            _ when path.EndsWith("/Poll", StringComparison.Ordinal) => Interlocked.Increment(ref polled) == 1
+                ? FakeServer.Json(new WorkAssignment(
+                    new WorkLease(_jobId, TestPlans.Attempt, 300, 1),
+                    new SourceFile(item, _library, WorkerLocalAddress.Format(_worker, missing), 10, DateTime.UtcNow),
+                    "HlsWorker/Jobs/x/Input"))
+                : FakeServer.Status(HttpStatusCode.NoContent),
+            _ => null
+        }));
+        var settings = Settings();
+        settings.WorkerId = _worker;
+        var plans = new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, string.Empty) };
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+
+        Assert.Equal(WorkerEngine.Success, await engine.RunAsync(plans, true, CancellationToken.None));
+
+        Assert.Contains(server.Paths, p => p.EndsWith($"/Jobs/{_jobId:N}/Return", StringComparison.Ordinal));
+        Assert.DoesNotContain(server.Paths, p => p.EndsWith("/Failed", StringComparison.Ordinal) || p.EndsWith("/Input", StringComparison.Ordinal));
+        var polls = Bodies(server, "/Poll").Select(b => JsonSerializer.Deserialize<WorkerRequest>(b, ServerClient.Json)!).ToList();
+        Assert.Empty(polls[0].ExcludedItems!);
+        Assert.Equal([item], polls[^1].ExcludedItems);
+
+        // A new run tries it again.
+        await engine.RunAsync(plans, true, CancellationToken.None);
+        polls = Bodies(server, "/Poll").Select(b => JsonSerializer.Deserialize<WorkerRequest>(b, ServerClient.Json)!).ToList();
+        Assert.Empty(polls[^1].ExcludedItems!);
+    }
+
+    [Fact]
     public async Task Run_StopsWhenTheServerCannotUseTheRoot()
     {
-        var server = new FakeServer((request, _) => Task.FromResult(request.RequestUri!.AbsolutePath.EndsWith("/Protocol", StringComparison.Ordinal)
-            ? FakeServer.Json(new ProtocolVersion(1))
-            : FakeServer.Json(new StoreTestResult(true, false, null))));
-        var settings = new WorkerSettings
-        {
-            ApiKey = "k",
-            WorkDirectory = Path.Combine(_directory, "work"),
-            Connections = [new ConnectionSettings { Name = "local", Type = ConnectionType.Local, LocalRoot = Path.Combine(_directory, "root") }],
-            Hls = new HlsTargetSettings { Connection = "local" }
-        };
-        using var engine = new WorkerEngine(settings, NullLoggerFactory.Instance, server);
+        var server = Serve((path, _) => Task.FromResult(path.EndsWith("/Bases/Check", StringComparison.Ordinal)
+            ? FakeServer.Json(new StoreTestResult(true, false, null))
+            : null));
+        var settings = Settings();
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
 
-        Assert.Equal(WorkerEngine.Failed, await engine.RunAsync(true, CancellationToken.None));
+        Assert.Equal(WorkerEngine.Failed, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, string.Empty) }, true, CancellationToken.None));
         Assert.DoesNotContain(server.Paths, p => p.EndsWith("/Poll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Run_RefusesAServerOfAnotherProtocol()
+    {
+        var server = Serve((path, _) => Task.FromResult(path.EndsWith("/Protocol", StringComparison.Ordinal) ? FakeServer.Json(new ProtocolVersion(1)) : null));
+        var settings = Settings();
+        using var engine = new WorkerEngine(settings, _store, NullLoggerFactory.Instance, server);
+
+        Assert.Equal(WorkerEngine.Failed, await engine.RunAsync(new Dictionary<Guid, HlsPlan> { [_library] = Hls(settings, string.Empty) }, true, CancellationToken.None));
+        Assert.DoesNotContain(server.Paths, p => p.EndsWith("/Workers", StringComparison.Ordinal) || p.EndsWith("/Poll", StringComparison.Ordinal));
+    }
+
+    [FfmpegFact]
+    public async Task Run_TellingTheLines_ReturnsWhatWasWritten()
+    {
+        var lines = new List<string>();
+
+        var output = await ProcessRunner.RunAsync("ffmpeg", ["-hide_banner", "-version"], CancellationToken.None, null, lines.Add);
+
+        Assert.NotEmpty(lines);
+        Assert.Equal(output, string.Concat(lines.Select(l => l + "\n")));
     }
 
     // 13.5 seconds of 640x360 at 25 fps with a stereo track that ends after 8 seconds and a text subtitle: streams 0, 1 and 2.
@@ -231,4 +336,37 @@ public sealed class WorkerEngineTests : IDisposable
             CancellationToken.None);
         return clip;
     }
+
+    private static string Body(FakeServer server, string suffix) => Bodies(server, suffix).First();
+
+    private static IEnumerable<string> Bodies(FakeServer server, string suffix)
+        => server.Requests.Where(r => r.Request.RequestUri!.AbsolutePath.EndsWith(suffix, StringComparison.Ordinal)).Select(r => r.Body);
+
+    // A server that speaks the protocol, gives the worker its id and accepts the root; route answers a path first, or leaves it with null.
+    private static FakeServer Serve(Func<string, string, Task<HttpResponseMessage?>> route)
+        => new(async (request, body) =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            return await route(path, body) ?? path switch
+            {
+                _ when path.EndsWith("/Protocol", StringComparison.Ordinal) => FakeServer.Json(new ProtocolVersion(3)),
+                _ when path.EndsWith("/Workers", StringComparison.Ordinal) => FakeServer.Json(new WorkerRegistered(_worker)),
+                _ when path.EndsWith("/Bases/Check", StringComparison.Ordinal) => FakeServer.Json(new StoreTestResult(true, true, null)),
+                _ => FakeServer.Status(HttpStatusCode.NoContent)
+            };
+        });
+
+    private HlsPlan Hls(WorkerSettings settings, string path, bool declare = true)
+        => SchemePlanner.ResolveHls(
+            settings,
+            new SchemeSettings { Id = Guid.NewGuid(), Name = "h", Hls = [new SchemeEntry { ConnectionId = _local.Id, Declare = declare }] },
+            new LibrarySettings { Id = _library, Prefix = path })!;
+
+    private WorkerSettings Settings() => new()
+    {
+        ApiKey = "k",
+        Name = "test",
+        TempDirectory = Path.Combine(_directory, "work"),
+        Connections = [_local]
+    };
 }

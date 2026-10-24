@@ -12,7 +12,7 @@ env:
   DOTNET_NOLOGO: 1
   # The jellyfin server the TrueCache tool is published from; keep it on the server release this worker pairs with.
   JELLYFIN_REPOSITORY: suujonH/jellyfin
-  JELLYFIN_REF: v13.0.0-hls.1
+  JELLYFIN_REF: v13.0.0-hls.2
 
 permissions:
   contents: read
@@ -57,7 +57,7 @@ jobs:
       - name: Check the tag against the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          version=$(dotnet msbuild worker/src/Jellyfin.Hls.Worker/Jellyfin.Hls.Worker.csproj -getProperty:Version | tr -d '\r\n ')
+          version=$(dotnet msbuild worker/src/Jellyfin.Hls.Worker.Gui/Jellyfin.Hls.Worker.Gui.csproj -getProperty:Version | tr -d '\r\n ')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::标签 $GITHUB_REF_NAME 与 Directory.Build.props 中的版本 $version 不一致"
             exit 1

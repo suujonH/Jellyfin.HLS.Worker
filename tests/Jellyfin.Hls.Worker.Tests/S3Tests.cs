@@ -40,6 +40,24 @@ public sealed class S3Tests : IDisposable
 
     public void Dispose() => Directory.Delete(_directory, true);
 
+    [Theory]
+    [InlineData(65L << 20, 64L << 20)]
+    [InlineData(10_000L * (64L << 20), 64L << 20)]
+    [InlineData((10_000L * (64L << 20)) + 1, 65L << 20)]
+    [InlineData(1L << 40, 105L << 20)]
+    [InlineData(10_000L * (5L << 30), 5L << 30)]
+    public void GetPartSize_KeepsToTenThousandPartsOfWholeMebibytes(long length, long expected)
+    {
+        var size = S3Connection.GetPartSize(length);
+
+        Assert.Equal(expected, size);
+        Assert.True((length + size - 1) / size <= 10_000);
+    }
+
+    [Fact]
+    public void GetPartSize_RefusesAFileTooLargeForFiveGibibyteParts()
+        => Assert.Throws<InvalidDataException>(() => S3Connection.GetPartSize((10_000L * (5L << 30)) + 1));
+
     [S3Fact]
     public async Task Put_UploadsALargeFileInParts_AndASmallOneAtOnce()
     {
@@ -47,7 +65,7 @@ public sealed class S3Tests : IDisposable
         using var client = new AmazonS3Client(new BasicAWSCredentials(Key, Secret), new AmazonS3Config { ServiceURL = Endpoint, ForcePathStyle = true });
         await client.PutBucketAsync(bucket);
         using var connection = StorageConnection.Create(
-            new ConnectionSettings { Name = "s3", Type = ConnectionType.S3, Endpoint = Endpoint!, Bucket = bucket, AccessKey = Key, SecretKey = Secret },
+            new ConnectionSettings { Name = "s3", Type = ConnectionType.S3, Endpoint = Endpoint!, Bucket = bucket, AccessKey = Key, SecretKey = Secret, PartConcurrency = 2 },
             NullLogger.Instance);
         using var session = await connection.OpenAsync(CancellationToken.None);
 
@@ -59,7 +77,9 @@ public sealed class S3Tests : IDisposable
         var small = Path.Combine(_directory, "small.srt");
         await File.WriteAllTextAsync(small, "1\n");
 
-        await session.PutAsync("media/large.mkv", large, CancellationToken.None);
+        var sent = new System.Collections.Concurrent.ConcurrentQueue<long>();
+        await session.PutAsync("media/large.mkv", large, CancellationToken.None, sent.Enqueue);
+        Assert.Equal(bytes.Length, sent.Max());
         await session.PutAsync("media/small.srt", small, CancellationToken.None);
 
         Assert.True(await session.ExistsAsync("media/large.mkv", CancellationToken.None));

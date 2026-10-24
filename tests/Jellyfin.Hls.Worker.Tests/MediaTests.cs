@@ -153,17 +153,4 @@ public sealed class MediaTests : IDisposable
 
         Assert.False(await MediaAdder.EnsureAccessAsync(client, connection, CancellationToken.None));
     }
-
-    [Fact]
-    public void Libraries_RefuseAConnectionThatIsNotS3()
-    {
-        var settings = new WorkerSettings
-        {
-            ApiKey = "k",
-            Connections = [new ConnectionSettings { Name = "local", Type = ConnectionType.Local, LocalRoot = _directory }],
-            Libraries = [new LibrarySettings { Id = Guid.NewGuid(), Connection = "local" }]
-        };
-
-        Assert.Throws<ArgumentException>(settings.Validate);
-    }
 }

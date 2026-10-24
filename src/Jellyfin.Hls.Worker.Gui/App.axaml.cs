@@ -14,7 +14,11 @@ internal sealed partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow = new MainWindow { DataContext = new MainViewModel(Program.ConfigPath) };
+            var viewModel = new MainViewModel(Program.Paths);
+            desktop.MainWindow = new MainWindow { DataContext = viewModel };
+
+            // What the server has may have changed since the settings were saved.
+            viewModel.RefreshInBackground();
         }
 
         base.OnFrameworkInitializationCompleted();

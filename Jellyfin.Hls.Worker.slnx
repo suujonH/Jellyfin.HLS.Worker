@@ -2,7 +2,6 @@
   <Folder Name="/src/">
     <Project Path="src/Jellyfin.Hls.Worker.Engine/Jellyfin.Hls.Worker.Engine.csproj" />
     <Project Path="src/Jellyfin.Hls.Worker.Gui/Jellyfin.Hls.Worker.Gui.csproj" />
-    <Project Path="src/Jellyfin.Hls.Worker/Jellyfin.Hls.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Jellyfin.Hls.Worker.Tests/Jellyfin.Hls.Worker.Tests.csproj" />
