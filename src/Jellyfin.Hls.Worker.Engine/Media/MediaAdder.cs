@@ -462,7 +462,7 @@ public sealed class MediaAdder
             IReadOnlyCollection<StoredUpload> uploadedBefore = resume ? _uploadLog.GetUncollected(id) : [];
             foreach (var upload in context.Source.Uploads.Where(u => !IsLanding(context, u)))
             {
-                await UploadAsync(context, upload, localPath, path, file, id, entryPath, uploadedBefore, token).ConfigureAwait(false);
+                await UploadAsync(context, upload, localPath, path, file, id, (sha256, size), entryPath, uploadedBefore, token).ConfigureAwait(false);
             }
 
             string? note = null;
@@ -489,7 +489,7 @@ public sealed class MediaAdder
             {
                 foreach (var upload in context.Source.Uploads.Where(u => IsLanding(context, u)))
                 {
-                    await UploadAsync(context, upload, localPath, path, file, id, entryPath, uploadedBefore, token).ConfigureAwait(false);
+                    await UploadAsync(context, upload, localPath, path, file, id, (sha256, size), entryPath, uploadedBefore, token).ConfigureAwait(false);
                 }
 
                 var (target, copy) = GetTarget(context, localPath, path);
@@ -500,7 +500,7 @@ public sealed class MediaAdder
                     file.Step(AddStep.Shortcut);
                     try
                     {
-                        await _writer.PutShortcutAsync(context.LibraryId, context.Location, entryPath, entry, target, token, id).ConfigureAwait(false);
+                        await _writer.PutShortcutAsync(context.LibraryId, context.Location, entryPath, entry, target, token, id, (sha256, size)).ConfigureAwait(false);
                         LogShortcut(context, entryPath, entry, entries, localPath, target, true, null, id);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
@@ -716,6 +716,7 @@ public sealed class MediaAdder
         string path,
         FileProgress file,
         string operationId,
+        (string Sha256, long Length) content,
         string entryPath,
         IReadOnlyCollection<StoredUpload> uploadedBefore,
         CancellationToken cancellationToken)
@@ -723,7 +724,8 @@ public sealed class MediaAdder
         var destination = Join(upload.Path, path);
         if (upload.Connection is null)
         {
-            // The server puts the file in place only while the operation holds it, which it does by the path the library sees.
+            // The server puts the file in place only while the operation holds it, which it does by the path the library sees;
+            // that file is the content, which the server links its item to.
             var holder = string.Equals(destination, entryPath, StringComparison.Ordinal) ? operationId : null;
             file.Step(AddStep.Upload, upload.Label);
             await TrackAsync(
@@ -731,7 +733,7 @@ public sealed class MediaAdder
                 context,
                 localPath,
                 InLibrary(destination),
-                () => _writer.PutFileAsync(context.LibraryId, context.Location, destination, localPath, cancellationToken, file.Bytes(new FileInfo(localPath).Length), holder),
+                () => _writer.PutFileAsync(context.LibraryId, context.Location, destination, localPath, cancellationToken, file.Bytes(new FileInfo(localPath).Length), holder, holder is null ? null : content),
                 operationId).ConfigureAwait(false);
             return;
         }

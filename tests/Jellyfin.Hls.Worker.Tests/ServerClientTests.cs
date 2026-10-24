@@ -102,7 +102,7 @@ public sealed class ServerClientTests
 
         Assert.Equal("u1", await client.StartUploadAsync(library, new LibraryUploadStart(null, "a/b.strm", 3, worker), CancellationToken.None));
         await client.PutChunkAsync("u1", 16, new byte[] { 1, 2, 3 }, CancellationToken.None);
-        await client.CompleteUploadAsync("u1", "s3://b/a.mkv", CancellationToken.None);
+        await client.CompleteUploadAsync("u1", "s3://b/a.mkv", CancellationToken.None, content: ("ab12", 7));
         await client.AbortUploadAsync("u1", CancellationToken.None);
         await client.ReturnAsync(library, "t", CancellationToken.None);
 
@@ -119,7 +119,7 @@ public sealed class ServerClientTests
         Assert.Contains("\"Path\":\"a/b.strm\"", requests[0].Body, StringComparison.Ordinal);
         Assert.Equal("?offset=16", requests[1].Request.RequestUri!.Query);
         Assert.Equal(new byte[] { 1, 2, 3 }, chunk);
-        Assert.Equal("""{"ShortcutTarget":"s3://b/a.mkv","OperationId":null}""", requests[2].Body);
+        Assert.Equal("""{"ShortcutTarget":"s3://b/a.mkv","OperationId":null,"Sha256":"ab12","ContentLength":7}""", requests[2].Body);
     }
 
     [Theory]
