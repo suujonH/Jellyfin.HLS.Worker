@@ -145,6 +145,12 @@ public sealed class AddMediaTests : IDisposable
             [new("Film/Film.nfo", null, "n"), new("Film/Film.mkv", null, "video")],
             _files.Files.Select(f => new Written(f.Path, f.ShortcutTarget, Encoding.UTF8.GetString(f.Content))));
         Assert.All(_files.Files, f => Assert.Equal((_library, "/srv/nas/movies", _worker), (f.LibraryId, f.Location, f.WorkerId)));
+
+        // The video the library sees is the content, which the server links its item to; another file is no content.
+        var content = Convert.ToHexStringLower(SHA256.HashData("video"u8));
+        Assert.Equal(
+            [(null, null), (content, 5L)],
+            _files.Files.Select(f => (f.Sha256, f.ContentLength)));
         Assert.Equal(_worker, _store.Read().WorkerId);
         Assert.Equal(Path.Combine(film, "Film.mkv"), Find("/srv/nas/movies/Film/Film.mkv", "video")?.LocalPath);
         Assert.Equal(
@@ -206,6 +212,7 @@ public sealed class AddMediaTests : IDisposable
         var shortcut = Assert.Single(_files.Files);
         Assert.Equal("Film.strm", shortcut.Path);
         Assert.Equal(WorkerLocalAddress.Format(_worker, copy), shortcut.ShortcutTarget);
+        Assert.Equal((Convert.ToHexStringLower(SHA256.HashData("video"u8)), (long?)5), (shortcut.Sha256, shortcut.ContentLength));
         using (var zip = new ZipArchive(new MemoryStream(shortcut.Content)))
         {
             Assert.Equal("probe.json", Assert.Single(zip.Entries).FullName);

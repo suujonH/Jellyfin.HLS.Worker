@@ -150,7 +150,7 @@ internal sealed class FakeLibrary
                 return FakeServer.Status(HttpStatusCode.Conflict, "The file is held by another operation.");
             }
 
-            Files.Enqueue(new LibraryFile(upload.LibraryId, upload.Start.Location, upload.Start.Path, upload.Start.WorkerId, complete.ShortcutTarget, upload.Data.ToArray()));
+            Files.Enqueue(new LibraryFile(upload.LibraryId, upload.Start.Location, upload.Start.Path, upload.Start.WorkerId, complete.ShortcutTarget, upload.Data.ToArray(), complete.Sha256, complete.ContentLength));
         }
 
         return FakeServer.Status(HttpStatusCode.NoContent);
@@ -158,4 +158,4 @@ internal sealed class FakeLibrary
 }
 
 /// <summary>A file the worker wrote into a folder of a library.</summary>
-internal sealed record LibraryFile(Guid LibraryId, string? Location, string Path, Guid WorkerId, string? ShortcutTarget, byte[] Content);
+internal sealed record LibraryFile(Guid LibraryId, string? Location, string Path, Guid WorkerId, string? ShortcutTarget, byte[] Content, string? Sha256 = null, long? ContentLength = null);

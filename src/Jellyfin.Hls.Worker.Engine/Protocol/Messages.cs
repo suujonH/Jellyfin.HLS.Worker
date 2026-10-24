@@ -52,9 +52,10 @@ public sealed record LibraryUpload(string UploadId);
 
 /// <summary>
 /// The end of an upload into a library: the target of the .strm file, for the zip of a TrueCache entry, and the operation that
-/// holds the file; when given, the file is put in place only while its working marker names this operation.
+/// holds the file; when given, the file is put in place only while its working marker names this operation. The hash and size of
+/// the media content the file is, of the target for a .strm file, let the server link the library item to the content at once.
 /// </summary>
-public sealed record LibraryUploadComplete(string? ShortcutTarget, string? OperationId = null);
+public sealed record LibraryUploadComplete(string? ShortcutTarget, string? OperationId = null, string? Sha256 = null, long? ContentLength = null);
 
 /// <summary>
 /// A file a worker adds to a folder of a library (<c>null</c> for the only one), by its path in it with forward slashes, marked as

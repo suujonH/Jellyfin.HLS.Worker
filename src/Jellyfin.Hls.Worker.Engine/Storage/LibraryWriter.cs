@@ -41,9 +41,18 @@ public sealed class LibraryWriter
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="sent">Told the bytes sent so far, a chunk at a time.</param>
     /// <param name="operationId">The operation that holds the file; it is put in place only while it does.</param>
+    /// <param name="content">The hash and size of the media content the file is; the server links the library item to it.</param>
     /// <returns>A task.</returns>
-    public Task PutFileAsync(Guid libraryId, string? location, string relative, string localFile, CancellationToken cancellationToken, Action<long>? sent = null, string? operationId = null)
-        => UploadAsync(libraryId, location, relative, localFile, null, cancellationToken, sent, operationId);
+    public Task PutFileAsync(
+        Guid libraryId,
+        string? location,
+        string relative,
+        string localFile,
+        CancellationToken cancellationToken,
+        Action<long>? sent = null,
+        string? operationId = null,
+        (string Sha256, long Length)? content = null)
+        => UploadAsync(libraryId, location, relative, localFile, null, cancellationToken, sent, operationId, content);
 
     /// <summary>
     /// Writes a .strm file into a folder of a library with its TrueCache entry: the server puts the entry in place, then the .strm.
@@ -55,14 +64,23 @@ public sealed class LibraryWriter
     /// <param name="target">What the .strm file refers to.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="operationId">The operation that holds the .strm file; it is put in place only while it does.</param>
+    /// <param name="content">The hash and size of the media content the target is; the server links the library item to it.</param>
     /// <returns>A task.</returns>
-    public async Task PutShortcutAsync(Guid libraryId, string? location, string relativeShortcut, string entryDirectory, string target, CancellationToken cancellationToken, string? operationId = null)
+    public async Task PutShortcutAsync(
+        Guid libraryId,
+        string? location,
+        string relativeShortcut,
+        string entryDirectory,
+        string target,
+        CancellationToken cancellationToken,
+        string? operationId = null,
+        (string Sha256, long Length)? content = null)
     {
         var zip = Path.TrimEndingDirectorySeparator(entryDirectory) + ".zip";
         try
         {
             ZipFile.CreateFromDirectory(entryDirectory, zip, CompressionLevel.Fastest, includeBaseDirectory: false);
-            await UploadAsync(libraryId, location, relativeShortcut, zip, target, cancellationToken, operationId: operationId).ConfigureAwait(false);
+            await UploadAsync(libraryId, location, relativeShortcut, zip, target, cancellationToken, operationId: operationId, content: content).ConfigureAwait(false);
         }
         finally
         {
@@ -78,7 +96,8 @@ public sealed class LibraryWriter
         string? shortcutTarget,
         CancellationToken cancellationToken,
         Action<long>? sent = null,
-        string? operationId = null)
+        string? operationId = null,
+        (string Sha256, long Length)? content = null)
     {
         var length = new FileInfo(localFile).Length;
         var id = await _server.StartUploadAsync(libraryId, new LibraryUploadStart(location, relative, length, _workerId()), cancellationToken).ConfigureAwait(false);
@@ -109,7 +128,7 @@ public sealed class LibraryWriter
                 }
             }
 
-            await _server.CompleteUploadAsync(id, shortcutTarget, cancellationToken, operationId).ConfigureAwait(false);
+            await _server.CompleteUploadAsync(id, shortcutTarget, cancellationToken, operationId, content).ConfigureAwait(false);
         }
         catch
         {

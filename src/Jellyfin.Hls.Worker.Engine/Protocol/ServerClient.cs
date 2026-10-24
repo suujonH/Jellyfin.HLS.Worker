@@ -137,9 +137,14 @@ public sealed class ServerClient : IDisposable
     /// <param name="shortcutTarget">The target of the .strm file when the upload is the zip of its entry; <c>null</c> for a file.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="operationId">The operation that holds the file; the server answers 409 when it no longer does.</param>
+    /// <param name="content">The hash and size of the media content the file is, for the server to link it.</param>
     /// <returns>A task.</returns>
-    public Task CompleteUploadAsync(string uploadId, string? shortcutTarget, CancellationToken cancellationToken, string? operationId = null)
-        => SendAsync<object>(HttpMethod.Post, UploadPath(uploadId) + "/Complete", new LibraryUploadComplete(shortcutTarget, operationId), cancellationToken);
+    public Task CompleteUploadAsync(string uploadId, string? shortcutTarget, CancellationToken cancellationToken, string? operationId = null, (string Sha256, long Length)? content = null)
+        => SendAsync<object>(
+            HttpMethod.Post,
+            UploadPath(uploadId) + "/Complete",
+            new LibraryUploadComplete(shortcutTarget, operationId, content?.Sha256, content?.Length),
+            cancellationToken);
 
     /// <summary>Marks a file the worker adds to a library as held by one of its operations, whatever held it before.</summary>
     /// <param name="libraryId">The library.</param>
